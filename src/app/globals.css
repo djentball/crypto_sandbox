@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+}
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+  font-family: var(--font-mono);
+}
