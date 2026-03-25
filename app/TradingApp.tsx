@@ -23,7 +23,13 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   sma_cross: { name: "SMA Crossover", desc: "BUY при SMA7>SMA14, SELL при SMA7<SMA14" },
   rsi_sma:   { name: "RSI + SMA Combo", desc: "BUY при RSI<30 і SMA7>SMA14, SELL при RSI>70 і SMA7<SMA14" },
   macd:      { name: "MACD Crossover", desc: "BUY коли MACD перетинає сигнал знизу, SELL — зверху" },
+  smc_fvg:   { name: "SMC: Fair Value Gap", desc: "BUY коли ціна входить в бичачий FVG, SELL — у ведмежий" },
+  smc_bos:   { name: "SMC: Break of Structure", desc: "BUY при бичачому BOS, SELL при ведмежому BOS" },
+  smc_ob:    { name: "SMC: Order Block", desc: "BUY при поверненні в бичачий OB, SELL — у ведмежий OB" },
 };
+
+/* ── candle type ── */
+interface Candle { o: number; h: number; l: number; c: number; t: number; }
 
 /* ── types ── */
 interface Trade {
@@ -34,6 +40,7 @@ interface Future {
   id: string; sym: string; side: string; leverage: number;
   entry: number; margin: number; notional: number; fee: number;
   openTime: string; liquidated: boolean; liqTime?: string;
+  sl?: number; tp?: number; closedBySl?: boolean; closedByTp?: boolean;
 }
 interface Strategy {
   type: string; symbols: string[]; amountPerTrade: number;
@@ -122,45 +129,108 @@ export default function TradingApp() {
   /* ---- prices ---- */
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [startPrices, setStartPrices] = useState<Record<string, number>>({});
-  const [priceHistory, setPriceHistory] = useState<Record<string, number[]>>(() =>
+  const [candleHistory, setCandleHistory] = useState<Record<string, Candle[]>>(() =>
     Object.fromEntries(SYMBOLS.map((s) => [s, []]))
   );
+  /* backwards-compat: closing-price array for RSI/SMA/MACD */
+  const priceHistory = useMemo(() => {
+    const m: Record<string, number[]> = {};
+    SYMBOLS.forEach((s) => { m[s] = (candleHistory[s] || []).map((c) => c.c); });
+    return m;
+  }, [candleHistory]);
+
   const startPricesSet = useRef(false);
   const tickRef = useRef(0);
 
-  const fetchPrices = useCallback(async () => {
-    try {
-      const r = await fetch(
-        `https://api.binance.com/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(SYMBOLS))}`
-      );
-      if (!r.ok) throw new Error("api");
-      const data = await r.json();
-      const m: Record<string, number> = {};
-      data.forEach((d: any) => (m[d.symbol] = parseFloat(d.price)));
-      return m;
-    } catch {
-      const base = Object.keys(prices).length ? prices : MOCK_BASE;
-      const m: Record<string, number> = {};
-      SYMBOLS.forEach((s) => { m[s] = base[s] * (1 + (Math.random() - 0.5) * 0.006); });
-      return m;
-    }
+  /* Fetch last N 15-min klines per symbol */
+  const fetchCandles = useCallback(async (): Promise<{ prices: Record<string, number>; candles: Record<string, Candle> }> => {
+    const pricesMap: Record<string, number> = {};
+    const candlesMap: Record<string, Candle> = {};
+    const results = await Promise.allSettled(
+      SYMBOLS.map(async (sym) => {
+        const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=15m&limit=1`);
+        if (!r.ok) throw new Error("api");
+        const data = await r.json();
+        const k = data[0]; /* [openTime, o, h, l, c, vol, closeTime, ...] */
+        const candle: Candle = { o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), t: k[0] };
+        pricesMap[sym] = candle.c;
+        candlesMap[sym] = candle;
+      })
+    );
+    /* fallback for failed symbols */
+    const base = Object.keys(prices).length ? prices : MOCK_BASE;
+    SYMBOLS.forEach((s) => {
+      if (!pricesMap[s]) {
+        const p = base[s] * (1 + (Math.random() - 0.5) * 0.006);
+        pricesMap[s] = p;
+        candlesMap[s] = { o: p * 0.999, h: p * 1.001, l: p * 0.998, c: p, t: Date.now() };
+      }
+    });
+    return { prices: pricesMap, candles: candlesMap };
   }, [prices]);
 
+  /* initial load: fetch recent history (100 candles) */
+  const histLoaded = useRef(false);
+  useEffect(() => {
+    if (histLoaded.current) return;
+    histLoaded.current = true;
+    (async () => {
+      try {
+        const results = await Promise.allSettled(
+          SYMBOLS.map(async (sym) => {
+            const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=15m&limit=${maxHist}`);
+            if (!r.ok) throw new Error("api");
+            const data = await r.json();
+            return { sym, candles: data.map((k: any) => ({ o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), t: k[0] } as Candle)) };
+          })
+        );
+        setCandleHistory((prev) => {
+          const n = { ...prev };
+          results.forEach((r) => {
+            if (r.status === "fulfilled") n[r.value.sym] = r.value.candles;
+          });
+          return n;
+        });
+        /* set initial prices from last candle */
+        const p: Record<string, number> = {};
+        results.forEach((r) => {
+          if (r.status === "fulfilled" && r.value.candles.length > 0) {
+            p[r.value.sym] = r.value.candles[r.value.candles.length - 1].c;
+          }
+        });
+        if (Object.keys(p).length > 0) {
+          setPrices(p);
+          if (!startPricesSet.current) { setStartPrices(p); startPricesSet.current = true; }
+          tickRef.current += 1;
+        }
+      } catch { /* fallback handled by interval */ }
+    })();
+  }, []);
+
+  /* periodic tick: append new candle */
   useEffect(() => {
     let live = true;
     const tick = async () => {
-      const p = await fetchPrices();
+      const { prices: p, candles: c } = await fetchCandles();
       if (!live) return;
       setPrices(p);
       tickRef.current += 1;
       if (!startPricesSet.current) { setStartPrices(p); startPricesSet.current = true; }
-      setPriceHistory((h) => {
+      setCandleHistory((h) => {
         const n = { ...h };
-        SYMBOLS.forEach((s) => { n[s] = [...(h[s] || []).slice(-(maxHist - 1)), p[s]]; });
+        SYMBOLS.forEach((s) => {
+          const prev = h[s] || [];
+          const last = prev[prev.length - 1];
+          /* replace if same candle time, append if new */
+          if (last && c[s] && last.t === c[s].t) {
+            n[s] = [...prev.slice(0, -1), c[s]].slice(-maxHist);
+          } else {
+            n[s] = [...prev, c[s]].slice(-maxHist);
+          }
+        });
         return n;
       });
     };
-    tick();
     const id = setInterval(tick, PRICE_INTERVAL);
     return () => { live = false; clearInterval(id); };
   }, []);
@@ -294,6 +364,8 @@ export default function TradingApp() {
   const [fSide, setFSide] = useState("LONG");
   const [fLev, setFLev] = useState(1);
   const [fAmt, setFAmt] = useState("");
+  const [fSl, setFSl] = useState("");
+  const [fTp, setFTp] = useState("");
 
   const execFutures = () => {
     const amount = parseFloat(fAmt);
@@ -302,12 +374,15 @@ export default function TradingApp() {
     const notional = amount;
     const margin = notional / fLev;
     const fee = notional * FUT_FEE;
+    const sl = fSl ? parseFloat(fSl) : undefined;
+    const tp = fTp ? parseFloat(fTp) : undefined;
     updateUser(activeUserId, (u) => {
       if (margin + fee > u.balance) return u;
       u.balance -= margin + fee;
       u.futures = [...u.futures, {
         id: uid(), sym: fSym, side: fSide, leverage: fLev,
         entry: price, margin, notional, fee, openTime: ts(), liquidated: false,
+        ...(sl ? { sl } : {}), ...(tp ? { tp } : {}),
       }];
       const trade: Trade = { id: uid(), time: ts(), sym: fSym, inst: "FUTURES", side: `OPEN ${fSide}`, price, amount: notional, fee, qty: notional / price };
       u.trades = [trade, ...u.trades];
@@ -315,31 +390,66 @@ export default function TradingApp() {
       persistUser(u);
       return u;
     });
-    setFAmt("");
+    setFAmt(""); setFSl(""); setFTp("");
   };
 
-  /* ---- futures liquidation ---- */
+  /* ---- futures liquidation + SL/TP ---- */
   useEffect(() => {
     if (!Object.keys(prices).length) return;
     setUsers((prev) =>
       prev.map((u) => {
         let changed = false;
+        let balDelta = 0;
+        const newTrades: Trade[] = [];
         const futs = u.futures.map((f) => {
-          if (f.liquidated) return f;
+          if (f.liquidated || f.closedBySl || f.closedByTp) return f;
           const cp = prices[f.sym];
           if (!cp) return f;
           const pnl = f.side === "LONG"
             ? ((cp - f.entry) / f.entry) * f.margin * f.leverage
             : ((f.entry - cp) / f.entry) * f.margin * f.leverage;
+
+          /* Liquidation */
           if (pnl <= -f.margin * 0.9) {
             changed = true;
             return { ...f, liquidated: true, liqTime: ts() };
           }
+
+          /* Stop Loss */
+          const slHit = f.sl && (
+            (f.side === "LONG" && cp <= f.sl) ||
+            (f.side === "SHORT" && cp >= f.sl)
+          );
+          if (slHit) {
+            changed = true;
+            const closeFee = f.notional * FUT_FEE;
+            balDelta += f.margin + pnl - closeFee;
+            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `SL ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl };
+            newTrades.push(trade);
+            api.recordTrade(u.id, trade);
+            return { ...f, closedBySl: true, liqTime: ts() };
+          }
+
+          /* Take Profit */
+          const tpHit = f.tp && (
+            (f.side === "LONG" && cp >= f.tp) ||
+            (f.side === "SHORT" && cp <= f.tp)
+          );
+          if (tpHit) {
+            changed = true;
+            const closeFee = f.notional * FUT_FEE;
+            balDelta += f.margin + pnl - closeFee;
+            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `TP ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl };
+            newTrades.push(trade);
+            api.recordTrade(u.id, trade);
+            return { ...f, closedByTp: true, liqTime: ts() };
+          }
+
           return f;
         });
         if (changed) {
-          const nu = { ...u, futures: futs };
-          api.updateUser(nu.id, { futures: futs });
+          const nu = { ...u, futures: futs, balance: u.balance + balDelta, trades: [...newTrades, ...u.trades] };
+          api.updateUser(nu.id, { balance: nu.balance, futures: futs });
           return nu;
         }
         return u;
@@ -350,7 +460,7 @@ export default function TradingApp() {
   const closeFuture = (fId: string) => {
     updateUser(activeUserId, (u) => {
       const f = u.futures.find((x) => x.id === fId);
-      if (!f || f.liquidated) return u;
+      if (!f || f.liquidated || f.closedBySl || f.closedByTp) return u;
       const cp = prices[f.sym];
       if (!cp) return u;
       const pnl = f.side === "LONG"
@@ -410,6 +520,110 @@ export default function TradingApp() {
     return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
   };
 
+  /* ── SMC (Smart Money Concepts) helpers ── */
+  interface SwingPoint { idx: number; price: number; type: "HH" | "HL" | "LH" | "LL" | "H" | "L"; }
+  interface FVG { type: "bull" | "bear"; top: number; bottom: number; idx: number; }
+  interface OrderBlock { type: "bull" | "bear"; top: number; bottom: number; idx: number; }
+
+  /* Знайти swing highs і swing lows (lookback = 2 свічки в кожну сторону) */
+  const findSwings = (candles: Candle[], lookback = 2): SwingPoint[] => {
+    const pts: SwingPoint[] = [];
+    if (candles.length < lookback * 2 + 1) return pts;
+    for (let i = lookback; i < candles.length - lookback; i++) {
+      let isHigh = true, isLow = true;
+      for (let j = 1; j <= lookback; j++) {
+        if (candles[i].h <= candles[i - j].h || candles[i].h <= candles[i + j].h) isHigh = false;
+        if (candles[i].l >= candles[i - j].l || candles[i].l >= candles[i + j].l) isLow = false;
+      }
+      if (isHigh) pts.push({ idx: i, price: candles[i].h, type: "H" });
+      if (isLow) pts.push({ idx: i, price: candles[i].l, type: "L" });
+    }
+    /* classify: HH/HL/LH/LL */
+    let lastH: SwingPoint | null = null, lastL: SwingPoint | null = null;
+    pts.forEach((p) => {
+      if (p.type === "H") {
+        p.type = lastH && p.price > lastH.price ? "HH" : "LH";
+        lastH = p;
+      } else {
+        p.type = lastL && p.price > lastL.price ? "HL" : "LL";
+        lastL = p;
+      }
+    });
+    return pts;
+  };
+
+  /* BOS (Break of Structure): ціна пробиває останній swing high/low */
+  const detectBOS = (candles: Candle[], swings: SwingPoint[]): "bullish" | "bearish" | null => {
+    if (candles.length < 5 || swings.length < 2) return null;
+    const last = candles[candles.length - 1];
+    const highs = swings.filter((s) => s.type === "HH" || s.type === "LH");
+    const lows = swings.filter((s) => s.type === "HL" || s.type === "LL");
+    const lastHigh = highs[highs.length - 1];
+    const lastLow = lows[lows.length - 1];
+    if (lastHigh && last.c > lastHigh.price) return "bullish";
+    if (lastLow && last.c < lastLow.price) return "bearish";
+    return null;
+  };
+
+  /* FVG (Fair Value Gap): 3 свічки, де high[0] < low[2] (bull) або low[0] > high[2] (bear) */
+  const findFVGs = (candles: Candle[]): FVG[] => {
+    const gaps: FVG[] = [];
+    if (candles.length < 3) return gaps;
+    for (let i = candles.length - 10; i < candles.length - 2; i++) {
+      if (i < 0) continue;
+      const c0 = candles[i], c2 = candles[i + 2];
+      if (c0.h < c2.l) gaps.push({ type: "bull", top: c2.l, bottom: c0.h, idx: i + 1 });
+      if (c0.l > c2.h) gaps.push({ type: "bear", top: c0.l, bottom: c2.h, idx: i + 1 });
+    }
+    return gaps;
+  };
+
+  /* FVG сигнал: ціна зараз входить в незаповнений FVG */
+  const detectFVG = (candles: Candle[]): "bullish" | "bearish" | null => {
+    const gaps = findFVGs(candles);
+    if (gaps.length === 0) return null;
+    const last = candles[candles.length - 1];
+    /* шукаємо останній незаповнений gap куди ціна щойно увійшла */
+    for (let i = gaps.length - 1; i >= 0; i--) {
+      const g = gaps[i];
+      if (g.type === "bull" && last.l <= g.top && last.c >= g.bottom) return "bullish";
+      if (g.type === "bear" && last.h >= g.bottom && last.c <= g.top) return "bearish";
+    }
+    return null;
+  };
+
+  /* Order Block: остання ведмежа свічка перед бичачим рухом (bull OB) і навпаки */
+  const findOrderBlocks = (candles: Candle[]): OrderBlock[] => {
+    const obs: OrderBlock[] = [];
+    if (candles.length < 5) return obs;
+    for (let i = candles.length - 15; i < candles.length - 2; i++) {
+      if (i < 0) continue;
+      const c = candles[i], next = candles[i + 1];
+      /* bull OB: bearish candle followed by strong bullish move */
+      if (c.c < c.o && next.c > next.o && (next.c - next.o) > (c.o - c.c) * 1.5) {
+        obs.push({ type: "bull", top: c.o, bottom: c.c, idx: i });
+      }
+      /* bear OB: bullish candle followed by strong bearish move */
+      if (c.c > c.o && next.c < next.o && (next.o - next.c) > (c.c - c.o) * 1.5) {
+        obs.push({ type: "bear", top: c.c, bottom: c.o, idx: i });
+      }
+    }
+    return obs;
+  };
+
+  /* OB сигнал: ціна повертається в зону order block */
+  const detectOB = (candles: Candle[]): "bullish" | "bearish" | null => {
+    const obs = findOrderBlocks(candles);
+    if (obs.length === 0) return null;
+    const last = candles[candles.length - 1];
+    for (let i = obs.length - 1; i >= 0; i--) {
+      const ob = obs[i];
+      if (ob.type === "bull" && last.l <= ob.top && last.c >= ob.bottom) return "bullish";
+      if (ob.type === "bear" && last.h >= ob.bottom && last.c <= ob.top) return "bearish";
+    }
+    return null;
+  };
+
   const signals = useMemo(() => {
     return SYMBOLS.map((s) => {
       const h = priceHistory[s] || [];
@@ -432,9 +646,31 @@ export default function TradingApp() {
         if (macdData.histogram > 0) { macdSignal = "BULLISH ▲"; macdColor = "text-green-400"; }
         else { macdSignal = "BEARISH ▼"; macdColor = "text-red-400"; }
       }
-      return { sym: s, rsi, rsiSignal, rsiColor, sma7, sma14, trend, trendColor, macdData, macdSignal, macdColor };
+      /* SMC signals */
+      const candles = candleHistory[s] || [];
+      const swings = findSwings(candles);
+      const bos = detectBOS(candles, swings);
+      const fvg = detectFVG(candles);
+      const ob = detectOB(candles);
+
+      let smcSignal = "—", smcColor = "text-gray-500";
+      const smcParts: string[] = [];
+      if (bos === "bullish") smcParts.push("BOS▲");
+      if (bos === "bearish") smcParts.push("BOS▼");
+      if (fvg === "bullish") smcParts.push("FVG▲");
+      if (fvg === "bearish") smcParts.push("FVG▼");
+      if (ob === "bullish") smcParts.push("OB▲");
+      if (ob === "bearish") smcParts.push("OB▼");
+      if (smcParts.length > 0) {
+        smcSignal = smcParts.join(" ");
+        const hasBull = smcParts.some((p) => p.includes("▲"));
+        const hasBear = smcParts.some((p) => p.includes("▼"));
+        smcColor = hasBull && hasBear ? "text-yellow-400" : hasBull ? "text-green-400" : "text-red-400";
+      }
+
+      return { sym: s, rsi, rsiSignal, rsiColor, sma7, sma14, trend, trendColor, macdData, macdSignal, macdColor, bos, fvg, ob, smcSignal, smcColor };
     });
-  }, [priceHistory]);
+  }, [priceHistory, candleHistory]);
 
   /* ═══ AUTO-STRATEGY ENGINE ═══ */
   const lastStrategyTick = useRef(0);
@@ -474,6 +710,22 @@ export default function TradingApp() {
             if (macdPrev.histogram <= 0 && macdNow.histogram > 0) action = "BUY";
             if (macdPrev.histogram >= 0 && macdNow.histogram < 0) action = "SELL";
           }
+        } else if (st.type === "smc_fvg") {
+          const candles = candleHistory[sym] || [];
+          const fvgSignal = detectFVG(candles);
+          if (fvgSignal === "bullish") action = "BUY";
+          if (fvgSignal === "bearish") action = "SELL";
+        } else if (st.type === "smc_bos") {
+          const candles = candleHistory[sym] || [];
+          const swings = findSwings(candles);
+          const bosSignal = detectBOS(candles, swings);
+          if (bosSignal === "bullish") action = "BUY";
+          if (bosSignal === "bearish") action = "SELL";
+        } else if (st.type === "smc_ob") {
+          const candles = candleHistory[sym] || [];
+          const obSignal = detectOB(candles);
+          if (obSignal === "bullish") action = "BUY";
+          if (obSignal === "bearish") action = "SELL";
         }
         if (!action) return;
 
@@ -486,7 +738,7 @@ export default function TradingApp() {
           uc.spot[sym] = (uc.spot[sym] || 0) + got;
           const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "BUY [AUTO]", price, amount: amt, fee: fee * price, qty: got };
           uc.trades = [trade, ...uc.trades];
-          const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}<30` : st.type === "sma_cross" ? "SMA7>SMA14" : st.type === "macd" ? "MACD cross ▲" : `RSI=${fmt(rsi!,1)}<30 & SMA7>SMA14`;
+          const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}<30` : st.type === "sma_cross" ? "SMA7>SMA14" : st.type === "macd" ? "MACD cross ▲" : st.type === "smc_fvg" ? "Bull FVG" : st.type === "smc_bos" ? "Bullish BOS" : st.type === "smc_ob" ? "Bull Order Block" : `RSI=${fmt(rsi!,1)}<30 & SMA7>SMA14`;
           const logEntry = { time, sym, action: "BUY", price, amount: amt, reason };
           uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
           api.recordTrade(uc.id, trade);
@@ -502,7 +754,7 @@ export default function TradingApp() {
             uc.balance += got;
             const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "SELL [AUTO]", price, amount: sellQty * price, fee, qty: sellQty };
             uc.trades = [trade, ...uc.trades];
-            const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}>70` : st.type === "sma_cross" ? "SMA7<SMA14" : st.type === "macd" ? "MACD cross ▼" : `RSI=${fmt(rsi!,1)}>70 & SMA7<SMA14`;
+            const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}>70` : st.type === "sma_cross" ? "SMA7<SMA14" : st.type === "macd" ? "MACD cross ▼" : st.type === "smc_fvg" ? "Bear FVG" : st.type === "smc_bos" ? "Bearish BOS" : st.type === "smc_ob" ? "Bear Order Block" : `RSI=${fmt(rsi!,1)}>70 & SMA7<SMA14`;
             const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordTrade(uc.id, trade);
@@ -520,7 +772,7 @@ export default function TradingApp() {
     let eq = u.balance;
     Object.entries(u.spot || {}).forEach(([s, qty]) => { eq += qty * (prices[s] || 0); });
     (u.futures || []).forEach((f) => {
-      if (f.liquidated) return;
+      if (f.liquidated || f.closedBySl || f.closedByTp) return;
       const cp = prices[f.sym] || f.entry;
       const pnl = f.side === "LONG"
         ? ((cp - f.entry) / f.entry) * f.margin * f.leverage
@@ -708,7 +960,11 @@ export default function TradingApp() {
               </div>
               <div className="mb-2"><label className="text-[10px] text-gray-500">ПЛЕЧЕ</label><div className="flex gap-1">{LEVERAGES.map((l) => <button key={l} onClick={() => setFLev(l)} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${fLev === l ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>x{l}</button>)}</div></div>
               <div className="mb-2"><label className="text-[10px] text-gray-500">СУМА (USDT)</label><input className={inp} type="number" placeholder="0.00" value={fAmt} onChange={(e) => setFAmt(e.target.value)} /></div>
-              {prices[fSym] && fAmt && parseFloat(fAmt) > 0 && <p className="text-[10px] text-gray-500 mb-2">Маржа: ${fmt(parseFloat(fAmt) / fLev)} · Notional: ${fmt(parseFloat(fAmt))} · Комісія: ${fmt(parseFloat(fAmt) * FUT_FEE)}</p>}
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <div><label className="text-[10px] text-gray-500">STOP LOSS ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 0.95 : 1.05), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fSl} onChange={(e) => setFSl(e.target.value)} /></div>
+                <div><label className="text-[10px] text-gray-500">TAKE PROFIT ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 1.05 : 0.95), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fTp} onChange={(e) => setFTp(e.target.value)} /></div>
+              </div>
+              {prices[fSym] && fAmt && parseFloat(fAmt) > 0 && <p className="text-[10px] text-gray-500 mb-2">Маржа: ${fmt(parseFloat(fAmt) / fLev)} · Notional: ${fmt(parseFloat(fAmt))} · Комісія: ${fmt(parseFloat(fAmt) * FUT_FEE)}{fSl ? ` · SL: $${fSl}` : ""}{fTp ? ` · TP: $${fTp}` : ""}</p>}
               <button onClick={execFutures} className={fSide === "LONG" ? btnG : btnR} style={{ width: "100%" }}>OPEN {fSide} x{fLev}</button>
             </div>
           )}
@@ -730,18 +986,27 @@ export default function TradingApp() {
             {activeUser.futures.length === 0 ? <p className="text-gray-600 text-xs">Немає відкритих futures-позицій</p> : (
               <div className="space-y-2">{activeUser.futures.map((f) => {
                 const cp = prices[f.sym] || f.entry;
+                const isClosed = f.liquidated || f.closedBySl || f.closedByTp;
                 const pnl = f.liquidated ? -f.margin : f.side === "LONG" ? ((cp - f.entry) / f.entry) * f.margin * f.leverage : ((f.entry - cp) / f.entry) * f.margin * f.leverage;
                 const pnlP = f.margin > 0 ? (pnl / f.margin) * 100 : 0;
+                const statusLabel = f.liquidated ? "LIQUIDATED" : f.closedBySl ? "STOP LOSS" : f.closedByTp ? "TAKE PROFIT" : null;
+                const statusColor = f.liquidated ? "text-red-500" : f.closedBySl ? "text-red-400" : "text-green-400";
                 return (
-                  <div key={f.id} className={`p-3 rounded border ${f.liquidated ? "border-red-800 bg-red-950/30" : "border-[#333] bg-[#0d0d0d]"}`}>
+                  <div key={f.id} className={`p-3 rounded border ${f.liquidated ? "border-red-800 bg-red-950/30" : f.closedBySl ? "border-red-700 bg-red-950/20" : f.closedByTp ? "border-green-700 bg-green-950/20" : "border-[#333] bg-[#0d0d0d]"}`}>
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-yellow-400 font-semibold text-sm">{NICE[f.sym]} {f.side} x{f.leverage}</span>
-                      {f.liquidated ? <span className="text-red-500 font-bold text-xs animate-pulse">LIQUIDATED</span> : <button onClick={() => closeFuture(f.id)} className="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1 rounded font-bold transition cursor-pointer">CLOSE</button>}
+                      {statusLabel ? <span className={`${statusColor} font-bold text-xs ${f.liquidated ? "animate-pulse" : ""}`}>{statusLabel}</span> : <button onClick={() => closeFuture(f.id)} className="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1 rounded font-bold transition cursor-pointer">CLOSE</button>}
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 sm:gap-2 text-[10px] text-gray-400">
                       <div>Entry: ${fmt(f.entry, f.entry < 1 ? 4 : 2)}</div><div>Current: ${fmt(cp, cp < 1 ? 4 : 2)}</div><div>Margin: ${fmt(f.margin)}</div>
                       <div className={pnl >= 0 ? "text-green-400" : "text-red-400"}>PnL: {pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</div>
                     </div>
+                    {(f.sl || f.tp) && !isClosed && (
+                      <div className="flex gap-3 mt-1 text-[10px]">
+                        {f.sl && <span className="text-red-400">SL: ${fmt(f.sl, f.sl < 1 ? 4 : 2)}</span>}
+                        {f.tp && <span className="text-green-400">TP: ${fmt(f.tp, f.tp < 1 ? 4 : 2)}</span>}
+                      </div>
+                    )}
                   </div>
                 );
               })}</div>
@@ -771,16 +1036,16 @@ export default function TradingApp() {
       {view === "signals" && (
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">СИГНАЛИ</h2>
-          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7/14) · MACD(12,26,9) · RSI/SMA потребують ≥15 тіків (~3.75 год) · MACD ≥26 тіків (~6.5 год)</p>
-          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI(14)</th><th className="text-center py-1">СИГНАЛ RSI</th><th className="text-center py-1">ТРЕНД SMA</th><th className="text-center py-1">MACD</th><th className="text-center py-1">СИГНАЛ MACD</th></tr></thead>
+          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7/14) · MACD(12,26,9) · SMC (BOS / FVG / OB) · Дані з Binance 15-хв свічок (OHLC)</p>
+          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI</th><th className="text-center py-1">RSI СИГ.</th><th className="text-center py-1">SMA</th><th className="text-center py-1">MACD</th><th className="text-center py-1">SMC</th></tr></thead>
             <tbody>{signals.map((s) => (
               <tr key={s.sym} className="border-t border-[#222]">
                 <td className="py-2 text-yellow-400 font-semibold whitespace-nowrap">{NICE[s.sym]}</td>
                 <td className="py-2 text-center">{s.rsi !== null ? fmt(s.rsi, 1) : "—"}</td>
                 <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.rsiColor}`}>{s.rsiSignal}</td>
                 <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.trendColor}`}>{s.trend}</td>
-                <td className="py-2 text-center whitespace-nowrap">{s.macdData ? `${fmt(s.macdData.histogram, 4)}` : "—"}</td>
                 <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.macdColor}`}>{s.macdSignal}</td>
+                <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.smcColor}`}>{s.smcSignal}</td>
               </tr>
             ))}</tbody></table></div>
         </div>
@@ -867,7 +1132,7 @@ export default function TradingApp() {
         </div>
       )}
 
-      <p className="text-center text-[10px] text-gray-700 mt-4">PAPER TRADING SIMULATOR · Neon Postgres · Binance REST API · {SYMBOLS.length} пар</p>
+      <p className="text-center text-[10px] text-gray-700 mt-4">PAPER TRADING SIMULATOR · Neon Postgres · Binance OHLC · SMC + TA · {SYMBOLS.length} пар</p>
     </div>
   );
 }

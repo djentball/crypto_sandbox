@@ -57,7 +57,7 @@ src/
 ### Data Flow
 1. On load: fetch users + strategies from DB
 2. On user switch: fetch trades + strategy log
-3. Prices: Binance REST API every 15min (client-side), fallback to mock ±0.3%
+3. Prices: Binance klines API (15m OHLC candles, client-side), initial load fetches 100 candles, then appends every 15min. Fallback to mock ±0.3%
 4. Trades: executed client-side, then POSTed to DB
 5. Strategy engine: runs client-side on price ticks, persists results to DB
 
@@ -71,12 +71,19 @@ src/
 - LONG PnL:  `(currentPrice - entryPrice) / entryPrice * margin * leverage`
 - SHORT PnL: `(entryPrice - currentPrice) / entryPrice * margin * leverage`
 - Liquidation: `PnL <= -margin * 0.9`
+- **Stop Loss**: optional price level; LONG triggers when `price <= SL`, SHORT when `price >= SL`
+- **Take Profit**: optional price level; LONG triggers when `price >= TP`, SHORT when `price <= TP`
+- SL/TP auto-close the position, return margin ± PnL − fee to balance, record trade as `SL LONG`/`TP SHORT` etc.
 
 ### Signals (local calc, no external API)
 - RSI(14): >70 OVERBOUGHT / <30 OVERSOLD / else NEUTRAL
 - SMA(7) vs SMA(14): bullish/bearish trend
 - MACD(12,26,9): EMA(12)−EMA(26) vs Signal EMA(9), histogram crossover
 - RSI/SMA need ≥15 price ticks (~3.75 hrs), MACD needs ≥26 ticks (~6.5 hrs)
+- **SMC (Smart Money Concepts)** — uses OHLC candle data:
+  - BOS (Break of Structure): detects swing highs/lows, signals when price breaks last swing point
+  - FVG (Fair Value Gap): finds 3-candle imbalances (high[0] < low[2] for bull, low[0] > high[2] for bear), signals when price enters gap
+  - Order Blocks: identifies last opposite candle before a strong impulsive move, signals when price returns to OB zone
 
 ### Auto-Strategy Engine
 Each user has a `strategy` object:
@@ -89,6 +96,9 @@ Each user has a `strategy` object:
 - `sma_cross` — SMA Crossover: BUY when SMA7>SMA14, SELL when SMA7<SMA14
 - `rsi_sma` — Combo: BUY when RSI<30 AND SMA7>SMA14, SELL when RSI>70 AND SMA7<SMA14
 - `macd` — MACD Crossover: BUY when MACD histogram crosses above 0, SELL when crosses below 0
+- `smc_fvg` — SMC Fair Value Gap: BUY when price enters bullish FVG, SELL when enters bearish FVG
+- `smc_bos` — SMC Break of Structure: BUY on bullish BOS, SELL on bearish BOS
+- `smc_ob` — SMC Order Block: BUY when price returns to bullish OB, SELL when returns to bearish OB
 
 **Execution**: on every price tick, for each user with `strategy.active === true`,
 the engine evaluates signals for each selected symbol and executes SPOT trades.
