@@ -552,7 +552,7 @@ export default function TradingApp() {
 
       {/* modals */}
       {editingUserId && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className={`${card} max-w-sm w-full`}>
             <h3 className="text-yellow-400 font-bold mb-3 text-sm">ПЕРЕЙМЕНУВАТИ ЮЗЕРА</h3>
             <input className={`${inp} mb-3`} placeholder="Нове ім'я" value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveRename()} autoFocus />
@@ -564,7 +564,7 @@ export default function TradingApp() {
         </div>
       )}
       {confirmDel && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className={`${card} max-w-sm w-full text-center`}>
             <p className="mb-4 text-sm">Видалити юзера <span className="text-yellow-400">{users.find((u) => u.id === confirmDel)?.name}</span>?</p>
             <div className="flex gap-3 justify-center">
@@ -575,7 +575,7 @@ export default function TradingApp() {
         </div>
       )}
       {showNewUser && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className={`${card} max-w-sm w-full`}>
             <h3 className="text-green-400 font-bold mb-3 text-sm">НОВИЙ ЮЗЕР</h3>
             <input className={`${inp} mb-2`} placeholder="Ім'я" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addUser()} autoFocus />
@@ -590,26 +590,26 @@ export default function TradingApp() {
 
       {/* ═══ BALANCE BAR ═══ */}
       {activeUser && (
-        <div className={`${card} mb-3 flex flex-wrap items-center gap-6`}>
-          <div><span className="text-xs text-gray-500">ЮЗЕР</span><p className="text-green-400 font-bold">{activeUser.name}</p></div>
-          <div><span className="text-xs text-gray-500">БАЛАНС</span><p className="text-white font-bold">${fmt(activeUser.balance)}</p></div>
-          <div><span className="text-xs text-gray-500">EQUITY</span><p className="text-white font-bold">${fmt(calcEquity(activeUser))}</p></div>
+        <div className={`${card} mb-3 grid grid-cols-2 sm:grid-cols-3 md:flex md:flex-wrap md:items-center gap-3 md:gap-6`}>
+          <div><span className="text-[10px] sm:text-xs text-gray-500">ЮЗЕР</span><p className="text-green-400 font-bold text-sm sm:text-base truncate">{activeUser.name}</p></div>
+          <div><span className="text-[10px] sm:text-xs text-gray-500">БАЛАНС</span><p className="text-white font-bold text-sm sm:text-base">${fmt(activeUser.balance)}</p></div>
+          <div><span className="text-[10px] sm:text-xs text-gray-500">EQUITY</span><p className="text-white font-bold text-sm sm:text-base">${fmt(calcEquity(activeUser))}</p></div>
           {(() => {
             const eq = calcEquity(activeUser);
             const pnl = eq - activeUser.startBal;
             const pnlP = activeUser.startBal > 0 ? (pnl / activeUser.startBal) * 100 : 0;
-            return <div><span className="text-xs text-gray-500">P&L</span><p className={`font-bold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</p></div>;
+            return <div><span className="text-[10px] sm:text-xs text-gray-500">P&L</span><p className={`font-bold text-sm sm:text-base ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</p></div>;
           })()}
           {activeUser.strategy?.active && activeUser.strategy.type !== "none" && (
-            <div><span className="text-xs text-gray-500">СТРАТЕГІЯ</span><p className="text-yellow-400 font-bold text-sm">⚡ {STRATEGIES[activeUser.strategy.type]?.name}</p></div>
+            <div className="col-span-2 sm:col-span-1"><span className="text-[10px] sm:text-xs text-gray-500">СТРАТЕГІЯ</span><p className="text-yellow-400 font-bold text-xs sm:text-sm">⚡ {STRATEGIES[activeUser.strategy.type]?.name}</p></div>
           )}
         </div>
       )}
 
       {/* ═══ NAV ═══ */}
-      <div className="flex gap-1 mb-3 flex-wrap">
+      <div className="grid grid-cols-4 sm:flex gap-1 mb-3 sm:flex-wrap">
         {["market", "trade", "portfolio", "trades", "signals", "strategy", "compare"].map((v) => (
-          <button key={v} onClick={() => setView(v)} className={`px-3 py-1.5 rounded text-xs font-semibold uppercase transition cursor-pointer ${view === v ? (v === "strategy" ? "bg-yellow-500 text-black" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>
+          <button key={v} onClick={() => setView(v)} className={`px-2 sm:px-3 py-1.5 rounded text-[10px] sm:text-xs font-semibold uppercase transition cursor-pointer ${view === v ? (v === "strategy" ? "bg-yellow-500 text-black" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>
             {v === "market" ? "Ринок" : v === "trade" ? "Торгівля" : v === "portfolio" ? "Портфель" : v === "trades" ? "Угоди" : v === "signals" ? "Сигнали" : v === "strategy" ? "⚡ Стратегія" : "Порівняння"}
           </button>
         ))}
@@ -638,7 +638,7 @@ export default function TradingApp() {
               </tbody>
             </table>
           </div>
-          <p className="text-[10px] text-gray-600 mt-2">Оновлення кожні 10 сек · Binance API</p>
+          <p className="text-[10px] text-gray-600 mt-2">Оновлення кожні 15 хв · Binance API</p>
         </div>
       )}
 
@@ -700,7 +700,7 @@ export default function TradingApp() {
                       <span className="text-yellow-400 font-semibold text-sm">{NICE[f.sym]} {f.side} x{f.leverage}</span>
                       {f.liquidated ? <span className="text-red-500 font-bold text-xs animate-pulse">LIQUIDATED</span> : <button onClick={() => closeFuture(f.id)} className="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1 rounded font-bold transition cursor-pointer">CLOSE</button>}
                     </div>
-                    <div className="grid grid-cols-4 gap-2 text-[10px] text-gray-400">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 sm:gap-2 text-[10px] text-gray-400">
                       <div>Entry: ${fmt(f.entry, f.entry < 1 ? 4 : 2)}</div><div>Current: ${fmt(cp, cp < 1 ? 4 : 2)}</div><div>Margin: ${fmt(f.margin)}</div>
                       <div className={pnl >= 0 ? "text-green-400" : "text-red-400"}>PnL: {pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</div>
                     </div>
@@ -733,18 +733,18 @@ export default function TradingApp() {
       {view === "signals" && (
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">СИГНАЛИ</h2>
-          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7) vs SMA(14) · Потрібно ≥15 тіків (~2.5 хв)</p>
-          <table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI(14)</th><th className="text-center py-1">СИГНАЛ RSI</th><th className="text-center py-1">SMA(7)</th><th className="text-center py-1">SMA(14)</th><th className="text-center py-1">ТРЕНД</th></tr></thead>
+          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7) vs SMA(14) · Потрібно ≥15 тіків (~3.75 год)</p>
+          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI(14)</th><th className="text-center py-1">СИГНАЛ RSI</th><th className="text-center py-1">SMA(7)</th><th className="text-center py-1">SMA(14)</th><th className="text-center py-1">ТРЕНД</th></tr></thead>
             <tbody>{signals.map((s) => (
               <tr key={s.sym} className="border-t border-[#222]">
-                <td className="py-2 text-yellow-400 font-semibold">{NICE[s.sym]}</td>
+                <td className="py-2 text-yellow-400 font-semibold whitespace-nowrap">{NICE[s.sym]}</td>
                 <td className="py-2 text-center">{s.rsi !== null ? fmt(s.rsi, 1) : "—"}</td>
-                <td className={`py-2 text-center font-semibold ${s.rsiColor}`}>{s.rsiSignal}</td>
-                <td className="py-2 text-center">{s.sma7 !== null ? `$${fmt(s.sma7, 2)}` : "—"}</td>
-                <td className="py-2 text-center">{s.sma14 !== null ? `$${fmt(s.sma14, 2)}` : "—"}</td>
-                <td className={`py-2 text-center font-semibold ${s.trendColor}`}>{s.trend}</td>
+                <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.rsiColor}`}>{s.rsiSignal}</td>
+                <td className="py-2 text-center whitespace-nowrap">{s.sma7 !== null ? `$${fmt(s.sma7, 2)}` : "—"}</td>
+                <td className="py-2 text-center whitespace-nowrap">{s.sma14 !== null ? `$${fmt(s.sma14, 2)}` : "—"}</td>
+                <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.trendColor}`}>{s.trend}</td>
               </tr>
-            ))}</tbody></table>
+            ))}</tbody></table></div>
         </div>
       )}
 
@@ -753,9 +753,9 @@ export default function TradingApp() {
         <div className="space-y-3">
           <div className={card}>
             <h2 className="text-yellow-400 font-bold text-sm mb-3">⚡ АВТО-СТРАТЕГІЯ — {activeUser.name}</h2>
-            <p className="text-[10px] text-gray-500 mb-4">Бот автоматично торгує SPOT на кожному тіку цін. Сигнали потребують ≥15 тіків (~2.5 хв).</p>
+            <p className="text-[10px] text-gray-500 mb-4">Бот автоматично торгує SPOT на кожному тіку цін. Сигнали потребують ≥15 тіків (~3.75 год).</p>
             <div className="mb-3"><label className="text-[10px] text-gray-500 block mb-1">СТРАТЕГІЯ</label>
-              <div className="grid grid-cols-2 gap-2">{Object.entries(STRATEGIES).map(([key, s]) => (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{Object.entries(STRATEGIES).map(([key, s]) => (
                 <button key={key} onClick={() => { updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, type: key } })); api.updateStrategy(activeUserId, { type: key }); }}
                   className={`p-2 rounded border text-left transition cursor-pointer ${activeUser.strategy?.type === key ? "border-yellow-500 bg-yellow-500/10" : "border-[#333] bg-[#0d0d0d] hover:border-[#444]"}`}>
                   <span className="text-xs font-bold block">{s.name}</span><span className="text-[10px] text-gray-500">{s.desc}</span>
@@ -810,22 +810,22 @@ export default function TradingApp() {
       {view === "compare" && (
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">ПОРІВНЯННЯ ЮЗЕРІВ</h2>
-          <table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ЮЗЕР</th><th className="text-left py-1">СТРАТЕГІЯ</th><th className="text-right py-1">СТАРТ</th><th className="text-right py-1">EQUITY</th><th className="text-right py-1">P&L $</th><th className="text-right py-1">P&L %</th><th className="text-right py-1">УГОД</th></tr></thead>
+          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ЮЗЕР</th><th className="text-left py-1">СТРАТЕГІЯ</th><th className="text-right py-1">СТАРТ</th><th className="text-right py-1">EQUITY</th><th className="text-right py-1">P&L $</th><th className="text-right py-1">P&L %</th><th className="text-right py-1">УГОД</th></tr></thead>
             <tbody>{users.map((u) => {
               const eq = calcEquity(u); const pnl = eq - u.startBal;
               const pnlP = u.startBal > 0 ? (pnl / u.startBal) * 100 : 0;
               return (
                 <tr key={u.id} className={`border-t border-[#222] ${u.id === activeUserId ? "bg-[#1a1a1a]" : ""}`}>
-                  <td className="py-2 text-yellow-400 font-semibold">{u.name}</td>
-                  <td className="py-2 text-xs">{u.strategy?.active && u.strategy.type !== "none" ? <span className="text-yellow-400">⚡ {STRATEGIES[u.strategy.type]?.name}</span> : <span className="text-gray-600">Ручна</span>}</td>
-                  <td className="py-2 text-right">${fmt(u.startBal)}</td>
-                  <td className="py-2 text-right text-white font-semibold">${fmt(eq)}</td>
-                  <td className={`py-2 text-right font-semibold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}${fmt(pnl)}</td>
-                  <td className={`py-2 text-right font-semibold ${pnlP >= 0 ? "text-green-400" : "text-red-400"}`}>{fmtP(pnlP)}</td>
+                  <td className="py-2 text-yellow-400 font-semibold whitespace-nowrap">{u.name}</td>
+                  <td className="py-2 text-xs whitespace-nowrap">{u.strategy?.active && u.strategy.type !== "none" ? <span className="text-yellow-400">⚡ {STRATEGIES[u.strategy.type]?.name}</span> : <span className="text-gray-600">Ручна</span>}</td>
+                  <td className="py-2 text-right whitespace-nowrap">${fmt(u.startBal)}</td>
+                  <td className="py-2 text-right text-white font-semibold whitespace-nowrap">${fmt(eq)}</td>
+                  <td className={`py-2 text-right font-semibold whitespace-nowrap ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}${fmt(pnl)}</td>
+                  <td className={`py-2 text-right font-semibold whitespace-nowrap ${pnlP >= 0 ? "text-green-400" : "text-red-400"}`}>{fmtP(pnlP)}</td>
                   <td className="py-2 text-right text-gray-400">{u.trades.length}</td>
                 </tr>
               );
-            })}</tbody></table>
+            })}</tbody></table></div>
         </div>
       )}
 
