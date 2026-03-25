@@ -22,6 +22,7 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   rsi:       { name: "RSI Mean Reversion", desc: "BUY при RSI<30, SELL при RSI>70" },
   sma_cross: { name: "SMA Crossover", desc: "BUY при SMA7>SMA14, SELL при SMA7<SMA14" },
   rsi_sma:   { name: "RSI + SMA Combo", desc: "BUY при RSI<30 і SMA7>SMA14, SELL при RSI>70 і SMA7<SMA14" },
+  macd:      { name: "MACD Crossover", desc: "BUY коли MACD перетинає сигнал знизу, SELL — зверху" },
 };
 
 /* ── types ── */
@@ -384,6 +385,30 @@ export default function TradingApp() {
     const s = arr.slice(-period);
     return s.reduce((a, b) => a + b, 0) / period;
   };
+  const calcEMA = (arr: number[], period: number): number | null => {
+    if (arr.length < period) return null;
+    const k = 2 / (period + 1);
+    let ema = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < arr.length; i++) ema = arr[i] * k + ema * (1 - k);
+    return ema;
+  };
+  const calcMACD = (arr: number[]): { macd: number; signal: number; histogram: number } | null => {
+    if (arr.length < 26) return null;
+    const ema12 = calcEMA(arr, 12);
+    const ema26 = calcEMA(arr, 26);
+    if (ema12 === null || ema26 === null) return null;
+    const macdLine = ema12 - ema26;
+    /* signal = EMA(9) of MACD line — approximate via recent MACD values */
+    const macdArr: number[] = [];
+    for (let i = 26; i <= arr.length; i++) {
+      const e12 = calcEMA(arr.slice(0, i), 12)!;
+      const e26 = calcEMA(arr.slice(0, i), 26)!;
+      macdArr.push(e12 - e26);
+    }
+    const signalLine = calcEMA(macdArr, 9);
+    if (signalLine === null) return null;
+    return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
+  };
 
   const signals = useMemo(() => {
     return SYMBOLS.map((s) => {
@@ -401,7 +426,13 @@ export default function TradingApp() {
         if (sma7 > sma14) { trend = "BULLISH ▲"; trendColor = "text-green-400"; }
         else { trend = "BEARISH ▼"; trendColor = "text-red-400"; }
       }
-      return { sym: s, rsi, rsiSignal, rsiColor, sma7, sma14, trend, trendColor };
+      const macdData = calcMACD(h);
+      let macdSignal = "—", macdColor = "text-yellow-400";
+      if (macdData) {
+        if (macdData.histogram > 0) { macdSignal = "BULLISH ▲"; macdColor = "text-green-400"; }
+        else { macdSignal = "BEARISH ▼"; macdColor = "text-red-400"; }
+      }
+      return { sym: s, rsi, rsiSignal, rsiColor, sma7, sma14, trend, trendColor, macdData, macdSignal, macdColor };
     });
   }, [priceHistory]);
 
@@ -436,6 +467,13 @@ export default function TradingApp() {
             if (rsi < 30 && sma7 > sma14) action = "BUY";
             if (rsi > 70 && sma7 < sma14) action = "SELL";
           }
+        } else if (st.type === "macd") {
+          const macdNow = calcMACD(h);
+          const macdPrev = h.length > 26 ? calcMACD(h.slice(0, -1)) : null;
+          if (macdNow && macdPrev) {
+            if (macdPrev.histogram <= 0 && macdNow.histogram > 0) action = "BUY";
+            if (macdPrev.histogram >= 0 && macdNow.histogram < 0) action = "SELL";
+          }
         }
         if (!action) return;
 
@@ -448,7 +486,7 @@ export default function TradingApp() {
           uc.spot[sym] = (uc.spot[sym] || 0) + got;
           const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "BUY [AUTO]", price, amount: amt, fee: fee * price, qty: got };
           uc.trades = [trade, ...uc.trades];
-          const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}<30` : st.type === "sma_cross" ? "SMA7>SMA14" : `RSI=${fmt(rsi!,1)}<30 & SMA7>SMA14`;
+          const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}<30` : st.type === "sma_cross" ? "SMA7>SMA14" : st.type === "macd" ? "MACD cross ▲" : `RSI=${fmt(rsi!,1)}<30 & SMA7>SMA14`;
           const logEntry = { time, sym, action: "BUY", price, amount: amt, reason };
           uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
           api.recordTrade(uc.id, trade);
@@ -464,7 +502,7 @@ export default function TradingApp() {
             uc.balance += got;
             const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "SELL [AUTO]", price, amount: sellQty * price, fee, qty: sellQty };
             uc.trades = [trade, ...uc.trades];
-            const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}>70` : st.type === "sma_cross" ? "SMA7<SMA14" : `RSI=${fmt(rsi!,1)}>70 & SMA7<SMA14`;
+            const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}>70` : st.type === "sma_cross" ? "SMA7<SMA14" : st.type === "macd" ? "MACD cross ▼" : `RSI=${fmt(rsi!,1)}>70 & SMA7<SMA14`;
             const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordTrade(uc.id, trade);
@@ -733,16 +771,16 @@ export default function TradingApp() {
       {view === "signals" && (
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">СИГНАЛИ</h2>
-          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7) vs SMA(14) · Потрібно ≥15 тіків (~3.75 год)</p>
-          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI(14)</th><th className="text-center py-1">СИГНАЛ RSI</th><th className="text-center py-1">SMA(7)</th><th className="text-center py-1">SMA(14)</th><th className="text-center py-1">ТРЕНД</th></tr></thead>
+          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7/14) · MACD(12,26,9) · RSI/SMA потребують ≥15 тіків (~3.75 год) · MACD ≥26 тіків (~6.5 год)</p>
+          <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI(14)</th><th className="text-center py-1">СИГНАЛ RSI</th><th className="text-center py-1">ТРЕНД SMA</th><th className="text-center py-1">MACD</th><th className="text-center py-1">СИГНАЛ MACD</th></tr></thead>
             <tbody>{signals.map((s) => (
               <tr key={s.sym} className="border-t border-[#222]">
                 <td className="py-2 text-yellow-400 font-semibold whitespace-nowrap">{NICE[s.sym]}</td>
                 <td className="py-2 text-center">{s.rsi !== null ? fmt(s.rsi, 1) : "—"}</td>
                 <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.rsiColor}`}>{s.rsiSignal}</td>
-                <td className="py-2 text-center whitespace-nowrap">{s.sma7 !== null ? `$${fmt(s.sma7, 2)}` : "—"}</td>
-                <td className="py-2 text-center whitespace-nowrap">{s.sma14 !== null ? `$${fmt(s.sma14, 2)}` : "—"}</td>
                 <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.trendColor}`}>{s.trend}</td>
+                <td className="py-2 text-center whitespace-nowrap">{s.macdData ? `${fmt(s.macdData.histogram, 4)}` : "—"}</td>
+                <td className={`py-2 text-center font-semibold whitespace-nowrap ${s.macdColor}`}>{s.macdSignal}</td>
               </tr>
             ))}</tbody></table></div>
         </div>

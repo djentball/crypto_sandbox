@@ -57,7 +57,7 @@ src/
 ### Data Flow
 1. On load: fetch users + strategies from DB
 2. On user switch: fetch trades + strategy log
-3. Prices: Binance REST API every 10s (client-side), fallback to mock ±0.3%
+3. Prices: Binance REST API every 15min (client-side), fallback to mock ±0.3%
 4. Trades: executed client-side, then POSTed to DB
 5. Strategy engine: runs client-side on price ticks, persists results to DB
 
@@ -75,7 +75,8 @@ src/
 ### Signals (local calc, no external API)
 - RSI(14): >70 OVERBOUGHT / <30 OVERSOLD / else NEUTRAL
 - SMA(7) vs SMA(14): bullish/bearish trend
-- Needs ≥15 price ticks (~2.5 min) to populate
+- MACD(12,26,9): EMA(12)−EMA(26) vs Signal EMA(9), histogram crossover
+- RSI/SMA need ≥15 price ticks (~3.75 hrs), MACD needs ≥26 ticks (~6.5 hrs)
 
 ### Auto-Strategy Engine
 Each user has a `strategy` object:
@@ -87,6 +88,7 @@ Each user has a `strategy` object:
 - `rsi` — RSI Mean Reversion: BUY when RSI<30, SELL when RSI>70
 - `sma_cross` — SMA Crossover: BUY when SMA7>SMA14, SELL when SMA7<SMA14
 - `rsi_sma` — Combo: BUY when RSI<30 AND SMA7>SMA14, SELL when RSI>70 AND SMA7<SMA14
+- `macd` — MACD Crossover: BUY when MACD histogram crosses above 0, SELL when crosses below 0
 
 **Execution**: on every price tick, for each user with `strategy.active === true`,
 the engine evaluates signals for each selected symbol and executes SPOT trades.
