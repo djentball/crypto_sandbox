@@ -72,7 +72,7 @@ const api = {
   async deleteUser(id: string) {
     await fetch(`/api/users?id=${id}`, { method: "DELETE" });
   },
-  async updateUser(id: string, data: { balance?: number; spot?: Record<string, number>; futures?: Future[] }) {
+  async updateUser(id: string, data: { name?: string; balance?: number; spot?: Record<string, number>; futures?: Future[] }) {
     await fetch(`/api/users/${id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -231,6 +231,18 @@ export default function TradingApp() {
       if (remaining.length > 0) setActiveUserId(remaining[0].id);
     }
     setConfirmDel(null);
+  };
+
+  /* ---- rename user ---- */
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const startRename = (u: User) => { setEditingUserId(u.id); setEditName(u.name); };
+  const saveRename = async () => {
+    if (!editingUserId || !editName.trim()) return;
+    const name = editName.trim();
+    updateUser(editingUserId, (u) => ({ ...u, name }));
+    await api.updateUser(editingUserId, { name });
+    setEditingUserId(null);
   };
 
   const [instrument, setInstrument] = useState("SPOT");
@@ -531,6 +543,7 @@ export default function TradingApp() {
               {u.name}
               {u.strategy?.active && u.strategy.type !== "none" && <span className="ml-1 text-yellow-400">⚡</span>}
             </button>
+            <button onClick={() => startRename(u)} className="text-gray-600 hover:text-yellow-400 text-xs px-1 transition cursor-pointer" title="Перейменувати">✎</button>
             {users.length > 1 && <button onClick={() => setConfirmDel(u.id)} className="text-red-800 hover:text-red-400 text-xs px-1 transition cursor-pointer">✕</button>}
           </div>
         ))}
@@ -538,6 +551,18 @@ export default function TradingApp() {
       </div>
 
       {/* modals */}
+      {editingUserId && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
+          <div className={`${card} max-w-sm w-full`}>
+            <h3 className="text-yellow-400 font-bold mb-3 text-sm">ПЕРЕЙМЕНУВАТИ ЮЗЕРА</h3>
+            <input className={`${inp} mb-3`} placeholder="Нове ім'я" value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveRename()} autoFocus />
+            <div className="flex gap-2">
+              <button onClick={saveRename} className={btnG}>Зберегти</button>
+              <button onClick={() => setEditingUserId(null)} className={btnN}>Скасувати</button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmDel && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
           <div className={`${card} max-w-sm w-full text-center`}>

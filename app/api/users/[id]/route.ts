@@ -13,6 +13,9 @@ export async function PATCH(
   const sets: string[] = [];
   const vals: Record<string, unknown> = {};
 
+  if (body.name !== undefined) {
+    await sql`UPDATE users SET name = ${body.name} WHERE id = ${id}`;
+  }
   if (body.balance !== undefined) {
     await sql`UPDATE users SET balance = ${body.balance} WHERE id = ${id}`;
   }
