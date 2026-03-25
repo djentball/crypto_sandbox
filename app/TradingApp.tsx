@@ -13,9 +13,9 @@ const NICE: Record<string, string> = { BTCUSDT: "BTC", ETHUSDT: "ETH", SOLUSDT: 
 const SPOT_FEE = 0.001;
 const FUT_FEE = 0.0004;
 const LEVERAGES = [1, 2, 5, 10, 20];
-const PRICE_INTERVAL = 10_000;
+const PRICE_INTERVAL = 900_000; /* 15 хвилин */
 const MOCK_BASE: Record<string, number> = { BTCUSDT: 67500, ETHUSDT: 3420, SOLUSDT: 172, BNBUSDT: 605, XRPUSDT: 0.62 };
-const maxHist = 30;
+const maxHist = 100;
 
 const STRATEGIES: Record<string, { name: string; desc: string }> = {
   none:      { name: "Без стратегії", desc: "Ручна торгівля" },
