@@ -20,12 +20,17 @@ const maxHist = 100;
 const STRATEGIES: Record<string, { name: string; desc: string }> = {
   none:      { name: "Без стратегії", desc: "Ручна торгівля" },
   rsi:       { name: "RSI Mean Reversion", desc: "BUY при RSI<30, SELL при RSI>70" },
-  sma_cross: { name: "SMA Crossover", desc: "BUY при SMA7>SMA14, SELL при SMA7<SMA14" },
-  rsi_sma:   { name: "RSI + SMA Combo", desc: "BUY при RSI<30 і SMA7>SMA14, SELL при RSI>70 і SMA7<SMA14" },
   macd:      { name: "MACD Crossover", desc: "BUY коли MACD перетинає сигнал знизу, SELL — зверху" },
+  donchian:  { name: "Donchian Breakout", desc: "BUY при пробої верхнього каналу (20), SELL при пробої нижнього" },
   smc_fvg:   { name: "SMC: Fair Value Gap", desc: "BUY коли ціна входить в бичачий FVG, SELL — у ведмежий" },
   smc_bos:   { name: "SMC: Break of Structure", desc: "BUY при бичачому BOS, SELL при ведмежому BOS" },
   smc_ob:    { name: "SMC: Order Block", desc: "BUY при поверненні в бичачий OB, SELL — у ведмежий OB" },
+};
+
+const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
+  "15m": { label: "15 хв", ms: 900_000, binance: "15m" },
+  "1h":  { label: "1 год", ms: 3_600_000, binance: "1h" },
+  "4h":  { label: "4 год", ms: 14_400_000, binance: "4h" },
 };
 
 /* ── candle type ── */
@@ -43,7 +48,7 @@ interface Future {
   sl?: number; tp?: number; closedBySl?: boolean; closedByTp?: boolean;
 }
 interface Strategy {
-  type: string; symbols: string[]; amountPerTrade: number;
+  type: string; symbols: string[]; amountPerTrade: number; timeframe: string;
   active: boolean; log: { time: string; sym: string; action: string; price: number; amount: number; reason: string }[];
 }
 interface User {
@@ -65,6 +70,7 @@ const api = {
         type: r.strategy_type || "none",
         symbols: r.strategy_symbols || ["BTCUSDT"],
         amountPerTrade: r.strategy_amount || 100,
+        timeframe: r.strategy_timeframe || "15m",
         active: r.strategy_active || false,
         log: [],
       },
@@ -106,7 +112,7 @@ const api = {
   async updateStrategy(userId: string, s: Partial<Strategy>) {
     await fetch("/api/strategies", {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, type: s.type, symbols: s.symbols, amountPerTrade: s.amountPerTrade, active: s.active }),
+      body: JSON.stringify({ userId, type: s.type, symbols: s.symbols, amountPerTrade: s.amountPerTrade, timeframe: s.timeframe, active: s.active }),
     });
   },
   async getStrategyLog(userId: string) {
@@ -132,6 +138,35 @@ export default function TradingApp() {
   const [candleHistory, setCandleHistory] = useState<Record<string, Candle[]>>(() =>
     Object.fromEntries(SYMBOLS.map((s) => [s, []]))
   );
+  /* multi-timeframe candle cache for strategies: { "1h": { "BTCUSDT": Candle[], ... }, ... } */
+  const [tfCandles, setTfCandles] = useState<Record<string, Record<string, Candle[]>>>({});
+  const tfLoadedRef = useRef<Set<string>>(new Set());
+
+  /* load candles for a specific timeframe (on demand) */
+  const loadTimeframeCandles = useCallback(async (tf: string) => {
+    if (tf === "15m" || tfLoadedRef.current.has(tf)) return; /* 15m is default candleHistory */
+    tfLoadedRef.current.add(tf);
+    const tfConf = TIMEFRAMES[tf];
+    if (!tfConf) return;
+    try {
+      const results = await Promise.allSettled(
+        SYMBOLS.map(async (sym) => {
+          const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${tfConf.binance}&limit=${maxHist}`);
+          if (!r.ok) throw new Error("api");
+          const data = await r.json();
+          return { sym, candles: data.map((k: any) => ({ o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), t: k[0] } as Candle)) };
+        })
+      );
+      setTfCandles((prev) => {
+        const n = { ...prev, [tf]: { ...(prev[tf] || {}) } };
+        results.forEach((r) => {
+          if (r.status === "fulfilled") n[tf][r.value.sym] = r.value.candles;
+        });
+        return n;
+      });
+    } catch { /* ignore */ }
+  }, []);
+
   /* backwards-compat: closing-price array for RSI/SMA/MACD */
   const priceHistory = useMemo(() => {
     const m: Record<string, number[]> = {};
@@ -284,7 +319,7 @@ export default function TradingApp() {
     const u: User = {
       id: res.id, name: res.name, startBal: res.startBal, balance: res.balance,
       spot: {}, futures: [], trades: [],
-      strategy: { type: "none", symbols: ["BTCUSDT"], amountPerTrade: 100, active: false, log: [] },
+      strategy: { type: "none", symbols: ["BTCUSDT"], amountPerTrade: 100, timeframe: "15m", active: false, log: [] },
     };
     setUsers((p) => [...p, u]);
     setActiveUserId(u.id);
@@ -672,6 +707,14 @@ export default function TradingApp() {
     });
   }, [priceHistory, candleHistory]);
 
+  /* auto-load candles when user changes strategy timeframe */
+  useEffect(() => {
+    users.forEach((u) => {
+      const tf = u.strategy?.timeframe;
+      if (tf && tf !== "15m") loadTimeframeCandles(tf);
+    });
+  }, [users.map((u) => u.strategy?.timeframe).join(",")]);
+
   /* ═══ AUTO-STRATEGY ENGINE ═══ */
   const lastStrategyTick = useRef(0);
   useEffect(() => {
@@ -684,48 +727,52 @@ export default function TradingApp() {
       if (!st || st.type === "none" || !st.active) return u;
       const uc = { ...u, strategy: { ...st, log: [...st.log] }, spot: { ...u.spot }, trades: [...u.trades] };
 
+      /* resolve candle data for the user's chosen timeframe */
+      const tf = st.timeframe || "15m";
+      const tfCandleMap = tf === "15m" ? candleHistory : (tfCandles[tf] || {});
+
       st.symbols.forEach((sym) => {
-        const h = priceHistory[sym] || [];
+        const tfCandlesForSym = tfCandleMap[sym] || candleHistory[sym] || [];
+        const h = tfCandlesForSym.map((c: Candle) => c.c);
         const price = prices[sym];
         if (!price) return;
         const rsi = calcRSI(h);
-        const sma7 = calcSMA(h, 7);
-        const sma14 = calcSMA(h, 14);
         let action: string | null = null;
+        let reason = "";
 
         if (st.type === "rsi") {
-          if (rsi !== null && rsi < 30) action = "BUY";
-          if (rsi !== null && rsi > 70) action = "SELL";
-        } else if (st.type === "sma_cross") {
-          if (sma7 !== null && sma14 !== null) { action = sma7 > sma14 ? "BUY" : "SELL"; }
-        } else if (st.type === "rsi_sma") {
-          if (rsi !== null && sma7 !== null && sma14 !== null) {
-            if (rsi < 30 && sma7 > sma14) action = "BUY";
-            if (rsi > 70 && sma7 < sma14) action = "SELL";
-          }
+          if (rsi !== null && rsi < 30) { action = "BUY"; reason = `RSI=${fmt(rsi,1)}<30`; }
+          if (rsi !== null && rsi > 70) { action = "SELL"; reason = `RSI=${fmt(rsi,1)}>70`; }
         } else if (st.type === "macd") {
           const macdNow = calcMACD(h);
           const macdPrev = h.length > 26 ? calcMACD(h.slice(0, -1)) : null;
           if (macdNow && macdPrev) {
-            if (macdPrev.histogram <= 0 && macdNow.histogram > 0) action = "BUY";
-            if (macdPrev.histogram >= 0 && macdNow.histogram < 0) action = "SELL";
+            if (macdPrev.histogram <= 0 && macdNow.histogram > 0) { action = "BUY"; reason = "MACD cross ▲"; }
+            if (macdPrev.histogram >= 0 && macdNow.histogram < 0) { action = "SELL"; reason = "MACD cross ▼"; }
+          }
+        } else if (st.type === "donchian") {
+          const period = 20;
+          if (tfCandlesForSym.length >= period + 1) {
+            const lookback = tfCandlesForSym.slice(-(period + 1), -1);
+            const dcHigh = Math.max(...lookback.map((c: Candle) => c.h));
+            const dcLow = Math.min(...lookback.map((c: Candle) => c.l));
+            const last = tfCandlesForSym[tfCandlesForSym.length - 1];
+            if (last.c > dcHigh) { action = "BUY"; reason = `Breakout ▲ ${fmt(dcHigh,2)}`; }
+            if (last.c < dcLow) { action = "SELL"; reason = `Breakdown ▼ ${fmt(dcLow,2)}`; }
           }
         } else if (st.type === "smc_fvg") {
-          const candles = candleHistory[sym] || [];
-          const fvgSignal = detectFVG(candles);
-          if (fvgSignal === "bullish") action = "BUY";
-          if (fvgSignal === "bearish") action = "SELL";
+          const fvgSignal = detectFVG(tfCandlesForSym);
+          if (fvgSignal === "bullish") { action = "BUY"; reason = "Bull FVG"; }
+          if (fvgSignal === "bearish") { action = "SELL"; reason = "Bear FVG"; }
         } else if (st.type === "smc_bos") {
-          const candles = candleHistory[sym] || [];
-          const swings = findSwings(candles);
-          const bosSignal = detectBOS(candles, swings);
-          if (bosSignal === "bullish") action = "BUY";
-          if (bosSignal === "bearish") action = "SELL";
+          const swings = findSwings(tfCandlesForSym);
+          const bosSignal = detectBOS(tfCandlesForSym, swings);
+          if (bosSignal === "bullish") { action = "BUY"; reason = "Bullish BOS"; }
+          if (bosSignal === "bearish") { action = "SELL"; reason = "Bearish BOS"; }
         } else if (st.type === "smc_ob") {
-          const candles = candleHistory[sym] || [];
-          const obSignal = detectOB(candles);
-          if (obSignal === "bullish") action = "BUY";
-          if (obSignal === "bearish") action = "SELL";
+          const obSignal = detectOB(tfCandlesForSym);
+          if (obSignal === "bullish") { action = "BUY"; reason = "Bull Order Block"; }
+          if (obSignal === "bearish") { action = "SELL"; reason = "Bear Order Block"; }
         }
         if (!action) return;
 
@@ -738,7 +785,6 @@ export default function TradingApp() {
           uc.spot[sym] = (uc.spot[sym] || 0) + got;
           const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "BUY [AUTO]", price, amount: amt, fee: fee * price, qty: got };
           uc.trades = [trade, ...uc.trades];
-          const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}<30` : st.type === "sma_cross" ? "SMA7>SMA14" : st.type === "macd" ? "MACD cross ▲" : st.type === "smc_fvg" ? "Bull FVG" : st.type === "smc_bos" ? "Bullish BOS" : st.type === "smc_ob" ? "Bull Order Block" : `RSI=${fmt(rsi!,1)}<30 & SMA7>SMA14`;
           const logEntry = { time, sym, action: "BUY", price, amount: amt, reason };
           uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
           api.recordTrade(uc.id, trade);
@@ -754,7 +800,6 @@ export default function TradingApp() {
             uc.balance += got;
             const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "SELL [AUTO]", price, amount: sellQty * price, fee, qty: sellQty };
             uc.trades = [trade, ...uc.trades];
-            const reason = st.type === "rsi" ? `RSI=${fmt(rsi!,1)}>70` : st.type === "sma_cross" ? "SMA7<SMA14" : st.type === "macd" ? "MACD cross ▼" : st.type === "smc_fvg" ? "Bear FVG" : st.type === "smc_bos" ? "Bearish BOS" : st.type === "smc_ob" ? "Bear Order Block" : `RSI=${fmt(rsi!,1)}>70 & SMA7<SMA14`;
             const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordTrade(uc.id, trade);
@@ -891,7 +936,7 @@ export default function TradingApp() {
             return <div><span className="text-[10px] sm:text-xs text-gray-500">P&L</span><p className={`font-bold text-sm sm:text-base ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</p></div>;
           })()}
           {activeUser.strategy?.active && activeUser.strategy.type !== "none" && (
-            <div className="col-span-2 sm:col-span-1"><span className="text-[10px] sm:text-xs text-gray-500">СТРАТЕГІЯ</span><p className="text-yellow-400 font-bold text-xs sm:text-sm">⚡ {STRATEGIES[activeUser.strategy.type]?.name}</p></div>
+            <div className="col-span-2 sm:col-span-1"><span className="text-[10px] sm:text-xs text-gray-500">СТРАТЕГІЯ</span><p className="text-yellow-400 font-bold text-xs sm:text-sm">⚡ {STRATEGIES[activeUser.strategy.type]?.name} <span className="text-gray-500">{TIMEFRAMES[activeUser.strategy.timeframe || "15m"]?.label}</span></p></div>
           )}
         </div>
       )}
@@ -1076,6 +1121,14 @@ export default function TradingApp() {
                       api.updateStrategy(activeUserId, { symbols: syms });
                     }} className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer ${active ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>{NICE[s]}</button>;
                   })}</div>
+                </div>
+                <div><label className="text-[10px] text-gray-500 block mb-1">ТАЙМФРЕЙМ</label>
+                  <div className="flex gap-1">{Object.entries(TIMEFRAMES).map(([key, tf]) => (
+                    <button key={key} onClick={() => {
+                      updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, timeframe: key } }));
+                      api.updateStrategy(activeUserId, { timeframe: key });
+                    }} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${(activeUser.strategy?.timeframe || "15m") === key ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>{tf.label}</button>
+                  ))}</div>
                 </div>
                 <div><label className="text-[10px] text-gray-500 block mb-1">СУМА НА ТРЕЙД (USDT)</label>
                   <input className={inp} type="number" value={activeUser.strategy?.amountPerTrade || 100} onChange={(e) => {

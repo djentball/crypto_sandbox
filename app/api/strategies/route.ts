@@ -3,17 +3,18 @@ import { getDb } from "@/lib/db";
 
 /* PATCH /api/strategies — update strategy for a user */
 export async function PATCH(req: NextRequest) {
-  const { userId, type, symbols, amountPerTrade, active } = await req.json();
+  const { userId, type, symbols, amountPerTrade, timeframe, active } = await req.json();
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
   const sql = getDb();
 
   await sql`
-    INSERT INTO strategies (user_id, type, symbols, amount_per_trade, active)
-    VALUES (${userId}, ${type ?? "none"}, ${JSON.stringify(symbols ?? ["BTCUSDT"])}::jsonb, ${amountPerTrade ?? 100}, ${active ?? false})
+    INSERT INTO strategies (user_id, type, symbols, amount_per_trade, timeframe, active)
+    VALUES (${userId}, ${type ?? "none"}, ${JSON.stringify(symbols ?? ["BTCUSDT"])}::jsonb, ${amountPerTrade ?? 100}, ${timeframe ?? "15m"}, ${active ?? false})
     ON CONFLICT (user_id) DO UPDATE SET
       type = COALESCE(${type}, strategies.type),
       symbols = COALESCE(${symbols ? JSON.stringify(symbols) : null}::jsonb, strategies.symbols),
       amount_per_trade = COALESCE(${amountPerTrade ?? null}, strategies.amount_per_trade),
+      timeframe = COALESCE(${timeframe ?? null}, strategies.timeframe),
       active = COALESCE(${active ?? null}, strategies.active)
   `;
   return NextResponse.json({ ok: true });

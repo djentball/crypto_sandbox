@@ -13,6 +13,7 @@ export async function GET() {
            COALESCE(s.type, 'none') as strategy_type,
            COALESCE(s.symbols, '["BTCUSDT"]'::jsonb) as strategy_symbols,
            COALESCE(s.amount_per_trade, 100) as strategy_amount,
+           COALESCE(s.timeframe, '15m') as strategy_timeframe,
            COALESCE(s.active, false) as strategy_active
     FROM users u
     LEFT JOIN strategies s ON s.user_id = u.id

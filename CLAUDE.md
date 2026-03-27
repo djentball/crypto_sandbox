@@ -88,17 +88,19 @@ src/
 ### Auto-Strategy Engine
 Each user has a `strategy` object:
 ```
-{ type, symbols: [], amountPerTrade, active: bool, log: [] }
+{ type, symbols: [], amountPerTrade, timeframe: "15m"|"1h"|"4h", active: bool, log: [] }
 ```
 **Available strategies** (defined in `STRATEGIES` object):
 - `none` — manual trading (default)
 - `rsi` — RSI Mean Reversion: BUY when RSI<30, SELL when RSI>70
-- `sma_cross` — SMA Crossover: BUY when SMA7>SMA14, SELL when SMA7<SMA14
-- `rsi_sma` — Combo: BUY when RSI<30 AND SMA7>SMA14, SELL when RSI>70 AND SMA7<SMA14
 - `macd` — MACD Crossover: BUY when MACD histogram crosses above 0, SELL when crosses below 0
+- `donchian` — Donchian Breakout (Turtle): BUY when price breaks above 20-period high, SELL when breaks below 20-period low
 - `smc_fvg` — SMC Fair Value Gap: BUY when price enters bullish FVG, SELL when enters bearish FVG
 - `smc_bos` — SMC Break of Structure: BUY on bullish BOS, SELL on bearish BOS
 - `smc_ob` — SMC Order Block: BUY when price returns to bullish OB, SELL when returns to bearish OB
+
+**Timeframes**: each user can select 15m, 1h, or 4h candle timeframe for their strategy.
+Higher timeframes reduce noise but produce fewer signals. Candle data is fetched from Binance klines API.
 
 **Execution**: on every price tick, for each user with `strategy.active === true`,
 the engine evaluates signals for each selected symbol and executes SPOT trades.
