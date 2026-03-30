@@ -40,6 +40,7 @@ interface Candle { o: number; h: number; l: number; c: number; t: number; }
 interface Trade {
   id: string; time: string; sym: string; inst: string; side: string;
   price: number; amount: number; fee: number; qty: number;
+  sl?: number; tp?: number;
 }
 interface Future {
   id: string; sym: string; side: string; leverage: number;
@@ -420,7 +421,7 @@ export default function TradingApp() {
         entry: price, margin, notional, fee, openTime: ts(), liquidated: false,
         ...(sl ? { sl } : {}), ...(tp ? { tp } : {}),
       }];
-      const trade: Trade = { id: uid(), time: ts(), sym: fSym, inst: "FUTURES", side: `OPEN ${fSide}`, price, amount: notional, fee, qty: notional / price };
+      const trade: Trade = { id: uid(), time: ts(), sym: fSym, inst: "FUTURES", side: `OPEN ${fSide}`, price, amount: notional, fee, qty: notional / price, ...(sl ? { sl } : {}), ...(tp ? { tp } : {}) };
       u.trades = [trade, ...u.trades];
       api.recordTrade(u.id, trade);
       persistUser(u);
@@ -460,7 +461,7 @@ export default function TradingApp() {
             changed = true;
             const closeFee = f.notional * FUT_FEE;
             balDelta += f.margin + pnl - closeFee;
-            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `SL ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl };
+            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `SL ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl, sl: f.sl, tp: f.tp };
             newTrades.push(trade);
             api.recordTrade(u.id, trade);
             return { ...f, closedBySl: true, liqTime: ts() };
@@ -475,7 +476,7 @@ export default function TradingApp() {
             changed = true;
             const closeFee = f.notional * FUT_FEE;
             balDelta += f.margin + pnl - closeFee;
-            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `TP ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl };
+            const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `TP ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl, sl: f.sl, tp: f.tp };
             newTrades.push(trade);
             api.recordTrade(u.id, trade);
             return { ...f, closedByTp: true, liqTime: ts() };
@@ -505,7 +506,7 @@ export default function TradingApp() {
       const closeFee = f.notional * FUT_FEE;
       u.balance += f.margin + pnl - closeFee;
       u.futures = u.futures.filter((x) => x.id !== fId);
-      const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `CLOSE ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl };
+      const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `CLOSE ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl, sl: f.sl, tp: f.tp };
       u.trades = [trade, ...u.trades];
       api.recordTrade(u.id, trade);
       persistUser(u);
@@ -1070,10 +1071,10 @@ export default function TradingApp() {
                       <div>Entry: ${fmt(f.entry, f.entry < 1 ? 4 : 2)}</div><div>Current: ${fmt(cp, cp < 1 ? 4 : 2)}</div><div>Margin: ${fmt(f.margin)}</div>
                       <div className={pnl >= 0 ? "text-green-400" : "text-red-400"}>PnL: {pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</div>
                     </div>
-                    {(f.sl || f.tp) && !isClosed && (
+                    {(f.sl || f.tp) && (
                       <div className="flex gap-3 mt-1 text-[10px]">
-                        {f.sl && <span className="text-red-400">SL: ${fmt(f.sl, f.sl < 1 ? 4 : 2)}</span>}
-                        {f.tp && <span className="text-green-400">TP: ${fmt(f.tp, f.tp < 1 ? 4 : 2)}</span>}
+                        {f.sl && <span className={isClosed ? "text-gray-500 line-through" : "text-red-400"}>SL: ${fmt(f.sl, f.sl < 1 ? 4 : 2)}</span>}
+                        {f.tp && <span className={isClosed ? "text-gray-500 line-through" : "text-green-400"}>TP: ${fmt(f.tp, f.tp < 1 ? 4 : 2)}</span>}
                       </div>
                     )}
                   </div>
@@ -1089,12 +1090,14 @@ export default function TradingApp() {
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">ІСТОРІЯ УГОД — {activeUser.name}</h2>
           {activeUser.trades.length === 0 ? <p className="text-gray-600 text-xs">Немає угод</p> : (
-            <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-gray-500"><th className="text-left py-1">ЧАС</th><th className="text-left py-1">ІНСТР</th><th className="text-left py-1">МОНЕТА</th><th className="text-left py-1">ТИП</th><th className="text-right py-1">ЦІНА</th><th className="text-right py-1">СУМА</th><th className="text-right py-1">КОМІСІЯ</th></tr></thead>
+            <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-gray-500"><th className="text-left py-1">ЧАС</th><th className="text-left py-1">ІНСТР</th><th className="text-left py-1">МОНЕТА</th><th className="text-left py-1">ТИП</th><th className="text-right py-1">ЦІНА</th><th className="text-right py-1">СУМА</th><th className="text-right py-1">КОМІСІЯ</th><th className="text-right py-1">SL</th><th className="text-right py-1">TP</th></tr></thead>
               <tbody>{activeUser.trades.map((t) => (
                 <tr key={t.id} className="border-t border-[#222]">
                   <td className="py-1 text-gray-400">{t.time}</td><td className="py-1">{t.inst}</td><td className="py-1 text-yellow-400">{NICE[t.sym]}</td>
                   <td className={`py-1 font-semibold ${t.side.includes("BUY") || t.side.includes("LONG") ? "text-green-400" : "text-red-400"}`}>{t.side}</td>
                   <td className="py-1 text-right">${fmt(t.price, t.price < 1 ? 4 : 2)}</td><td className="py-1 text-right">${fmt(t.amount)}</td><td className="py-1 text-right text-gray-500">${fmt(t.fee, 4)}</td>
+                  <td className="py-1 text-right text-red-400">{t.sl ? `$${fmt(t.sl, t.sl < 1 ? 4 : 2)}` : "—"}</td>
+                  <td className="py-1 text-right text-green-400">{t.tp ? `$${fmt(t.tp, t.tp < 1 ? 4 : 2)}` : "—"}</td>
                 </tr>
               ))}</tbody></table></div>
           )}
