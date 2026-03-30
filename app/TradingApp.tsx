@@ -356,6 +356,326 @@ export default function TradingApp() {
   const [instrument, setInstrument] = useState("SPOT");
   const [view, setView] = useState("market");
 
+  /* ═══ BACKTEST STATE ═══ */
+  interface BtTrade { time: number; sym: string; action: string; price: number; amount: number; fee: number; reason: string; balance: number; pnl?: number; }
+  interface BtResult { trades: BtTrade[]; finalBalance: number; startBalance: number; maxDrawdown: number; winRate: number; totalTrades: number; equity: { t: number; v: number }[]; liquidations: number; instrument: string; }
+  const [btStrategy, setBtStrategy] = useState("rsi");
+  const [btSymbols, setBtSymbols] = useState<string[]>(["BTCUSDT"]);
+  const [btTimeframe, setBtTimeframe] = useState("1h");
+  const [btPeriod, setBtPeriod] = useState("3m");
+  const [btBalance, setBtBalance] = useState("1000");
+  const [btAmount, setBtAmount] = useState("100");
+  const [btInstrument, setBtInstrument] = useState("SPOT");
+  const [btLeverage, setBtLeverage] = useState(5);
+  const [btSide, setBtSide] = useState<"AUTO" | "LONG" | "SHORT">("AUTO");
+  const [btSl, setBtSl] = useState("");
+  const [btTp, setBtTp] = useState("");
+  const [btRunning, setBtRunning] = useState(false);
+  const [btResult, setBtResult] = useState<BtResult | null>(null);
+  const [btProgress, setBtProgress] = useState("");
+
+  const BT_PERIODS: Record<string, { label: string; days: number }> = {
+    "1m": { label: "1 місяць", days: 30 },
+    "3m": { label: "3 місяці", days: 90 },
+    "6m": { label: "6 місяців", days: 180 },
+    "1y": { label: "1 рік", days: 365 },
+  };
+
+  const fetchHistCandles = async (sym: string, interval: string, startMs: number, endMs: number): Promise<Candle[]> => {
+    const all: Candle[] = [];
+    let cursor = startMs;
+    while (cursor < endMs) {
+      const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
+      const r = await fetch(url);
+      if (!r.ok) break;
+      const data = await r.json();
+      if (!data.length) break;
+      data.forEach((k: any) => all.push({ o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), t: k[0] }));
+      cursor = data[data.length - 1][0] + 1;
+      if (data.length < 1000) break;
+    }
+    return all;
+  };
+
+  /* helper: evaluate strategy signal on a candle slice */
+  const evalSignal = (strat: string, slice: Candle[]): { action: string; reason: string } | null => {
+    const h = slice.map((c) => c.c);
+    if (strat === "rsi") {
+      const rsi = calcRSI(h);
+      if (rsi !== null && rsi < 30) return { action: "BUY", reason: `RSI=${fmt(rsi,1)}<30` };
+      if (rsi !== null && rsi > 70) return { action: "SELL", reason: `RSI=${fmt(rsi,1)}>70` };
+    } else if (strat === "macd") {
+      const macdNow = calcMACD(h);
+      const macdPrev = h.length > 26 ? calcMACD(h.slice(0, -1)) : null;
+      if (macdNow && macdPrev) {
+        if (macdPrev.histogram <= 0 && macdNow.histogram > 0) return { action: "BUY", reason: "MACD cross ▲" };
+        if (macdPrev.histogram >= 0 && macdNow.histogram < 0) return { action: "SELL", reason: "MACD cross ▼" };
+      }
+    } else if (strat === "donchian") {
+      if (slice.length >= 21) {
+        const lookback = slice.slice(-21, -1);
+        const dcHigh = Math.max(...lookback.map((c) => c.h));
+        const dcLow = Math.min(...lookback.map((c) => c.l));
+        const last = slice[slice.length - 1];
+        if (last.c > dcHigh) return { action: "BUY", reason: `Breakout ▲ ${fmt(dcHigh,2)}` };
+        if (last.c < dcLow) return { action: "SELL", reason: `Breakdown ▼ ${fmt(dcLow,2)}` };
+      }
+    } else if (strat === "smc_fvg") {
+      const sig = detectFVG(slice);
+      if (sig === "bullish") return { action: "BUY", reason: "Bull FVG" };
+      if (sig === "bearish") return { action: "SELL", reason: "Bear FVG" };
+    } else if (strat === "smc_bos") {
+      const swings = findSwings(slice);
+      const sig = detectBOS(slice, swings);
+      if (sig === "bullish") return { action: "BUY", reason: "Bullish BOS" };
+      if (sig === "bearish") return { action: "SELL", reason: "Bearish BOS" };
+    } else if (strat === "smc_ob") {
+      const sig = detectOB(slice);
+      if (sig === "bullish") return { action: "BUY", reason: "Bull OB" };
+      if (sig === "bearish") return { action: "SELL", reason: "Bear OB" };
+    }
+    return null;
+  };
+
+  const runBacktest = async () => {
+    setBtRunning(true);
+    setBtResult(null);
+    setBtProgress("Завантаження свічок...");
+    const periodDays = BT_PERIODS[btPeriod]?.days || 90;
+    const endMs = Date.now();
+    const startMs = endMs - periodDays * 86400_000;
+    const tfBinance = TIMEFRAMES[btTimeframe]?.binance || "1h";
+    const isFutures = btInstrument === "FUTURES";
+
+    /* fetch candles for all selected symbols */
+    const candleMap: Record<string, Candle[]> = {};
+    for (let i = 0; i < btSymbols.length; i++) {
+      const sym = btSymbols[i];
+      setBtProgress(`Завантаження ${NICE[sym] || sym} (${i + 1}/${btSymbols.length})...`);
+      candleMap[sym] = await fetchHistCandles(sym, tfBinance, startMs, endMs);
+    }
+
+    setBtProgress("Запуск стратегії...");
+    const startBal = parseFloat(btBalance) || 1000;
+    const amtPerTrade = parseFloat(btAmount) || 100;
+    let balance = startBal;
+    const trades: BtTrade[] = [];
+    const equity: { t: number; v: number }[] = [];
+    const lastAction: Record<string, string> = {};
+    let liquidations = 0;
+
+    /* find max candle count to iterate */
+    const maxLen = Math.max(...btSymbols.map((s) => candleMap[s]?.length || 0));
+
+    if (!isFutures) {
+      /* ── SPOT MODE ── */
+      const holdings: Record<string, number> = {};
+      for (let i = 0; i < maxLen; i++) {
+        btSymbols.forEach((sym) => {
+          const candles = candleMap[sym];
+          if (!candles || i >= candles.length) return;
+          const slice = candles.slice(0, i + 1);
+          if (slice.length < 5) return;
+          const price = slice[slice.length - 1].c;
+          const sig = evalSignal(btStrategy, slice);
+          if (!sig) return;
+          const { action, reason } = sig;
+          if (lastAction[sym] === action) return;
+          const time = candles[i].t;
+          if (action === "BUY" && balance >= amtPerTrade) {
+            const got = (amtPerTrade / price) * (1 - SPOT_FEE);
+            const fee = amtPerTrade * SPOT_FEE;
+            balance -= amtPerTrade;
+            holdings[sym] = (holdings[sym] || 0) + got;
+            trades.push({ time, sym, action: "BUY", price, amount: amtPerTrade, fee, reason, balance });
+            lastAction[sym] = "BUY";
+          } else if (action === "BUY") {
+            lastAction[sym] = "BUY";
+          } else if (action === "SELL") {
+            const held = holdings[sym] || 0;
+            const sellQty = Math.min(amtPerTrade / price, held);
+            if (sellQty > 0) {
+              const got = sellQty * price * (1 - SPOT_FEE);
+              const fee = sellQty * price * SPOT_FEE;
+              holdings[sym] = held - sellQty;
+              if (holdings[sym] < 1e-10) delete holdings[sym];
+              balance += got;
+              trades.push({ time, sym, action: "SELL", price, amount: sellQty * price, fee, reason, balance });
+            }
+            lastAction[sym] = "SELL";
+          }
+        });
+        if (i % 10 === 0 || i === maxLen - 1) {
+          let eq = balance;
+          Object.entries(holdings).forEach(([s, qty]) => {
+            const c = candleMap[s]; if (c && c[Math.min(i, c.length - 1)]) eq += qty * c[Math.min(i, c.length - 1)].c;
+          });
+          const t = candleMap[btSymbols[0]]?.[Math.min(i, (candleMap[btSymbols[0]]?.length || 1) - 1)]?.t || 0;
+          equity.push({ t, v: eq });
+        }
+      }
+      /* close remaining */
+      btSymbols.forEach((sym) => {
+        const held = holdings[sym] || 0;
+        if (held > 0) { const lp = candleMap[sym]?.[candleMap[sym].length - 1]?.c || 0; balance += held * lp * (1 - SPOT_FEE); }
+      });
+    } else {
+      /* ── FUTURES MODE ── */
+      interface BtFuture { sym: string; side: "LONG" | "SHORT"; entry: number; margin: number; notional: number; leverage: number; sl?: number; tp?: number; }
+      const openPositions: BtFuture[] = [];
+      const leverage = btLeverage;
+      const slPct = btSl ? parseFloat(btSl) : 0; /* % from entry */
+      const tpPct = btTp ? parseFloat(btTp) : 0;
+
+      for (let i = 0; i < maxLen; i++) {
+        /* check SL/TP/liquidation on open positions using candle OHLC */
+        for (let p = openPositions.length - 1; p >= 0; p--) {
+          const pos = openPositions[p];
+          const candles = candleMap[pos.sym];
+          if (!candles || i >= candles.length) continue;
+          const candle = candles[i];
+          const highPrice = candle.h;
+          const lowPrice = candle.l;
+
+          /* liquidation check: PnL <= -margin * 0.9 */
+          const worstPrice = pos.side === "LONG" ? lowPrice : highPrice;
+          const worstPnl = pos.side === "LONG"
+            ? ((worstPrice - pos.entry) / pos.entry) * pos.margin * pos.leverage
+            : ((pos.entry - worstPrice) / pos.entry) * pos.margin * pos.leverage;
+          if (worstPnl <= -pos.margin * 0.9) {
+            trades.push({ time: candle.t, sym: pos.sym, action: `LIQ ${pos.side}`, price: worstPrice, amount: pos.notional, fee: 0, reason: "Ліквідація", balance, pnl: -pos.margin });
+            liquidations++;
+            openPositions.splice(p, 1);
+            continue;
+          }
+
+          /* SL check */
+          if (pos.sl) {
+            const slHit = pos.side === "LONG" ? lowPrice <= pos.sl : highPrice >= pos.sl;
+            if (slHit) {
+              const closePrice = pos.sl;
+              const pnl = pos.side === "LONG"
+                ? ((closePrice - pos.entry) / pos.entry) * pos.margin * pos.leverage
+                : ((pos.entry - closePrice) / pos.entry) * pos.margin * pos.leverage;
+              const closeFee = pos.notional * FUT_FEE;
+              balance += pos.margin + pnl - closeFee;
+              trades.push({ time: candle.t, sym: pos.sym, action: `SL ${pos.side}`, price: closePrice, amount: pos.notional, fee: closeFee, reason: `SL ${fmt(pos.sl, pos.sl < 1 ? 4 : 2)}`, balance, pnl });
+              openPositions.splice(p, 1);
+              continue;
+            }
+          }
+
+          /* TP check */
+          if (pos.tp) {
+            const tpHit = pos.side === "LONG" ? highPrice >= pos.tp : lowPrice <= pos.tp;
+            if (tpHit) {
+              const closePrice = pos.tp;
+              const pnl = pos.side === "LONG"
+                ? ((closePrice - pos.entry) / pos.entry) * pos.margin * pos.leverage
+                : ((pos.entry - closePrice) / pos.entry) * pos.margin * pos.leverage;
+              const closeFee = pos.notional * FUT_FEE;
+              balance += pos.margin + pnl - closeFee;
+              trades.push({ time: candle.t, sym: pos.sym, action: `TP ${pos.side}`, price: closePrice, amount: pos.notional, fee: closeFee, reason: `TP ${fmt(pos.tp, pos.tp < 1 ? 4 : 2)}`, balance, pnl });
+              openPositions.splice(p, 1);
+              continue;
+            }
+          }
+        }
+
+        /* strategy signals → open/close positions */
+        btSymbols.forEach((sym) => {
+          const candles = candleMap[sym];
+          if (!candles || i >= candles.length) return;
+          const slice = candles.slice(0, i + 1);
+          if (slice.length < 5) return;
+          const price = slice[slice.length - 1].c;
+          const sig = evalSignal(btStrategy, slice);
+          if (!sig) return;
+          const { action, reason } = sig;
+          if (lastAction[sym] === action) return;
+
+          const time = candles[i].t;
+          const existingPos = openPositions.find((p) => p.sym === sym);
+
+          /* determine futures side */
+          let fSide: "LONG" | "SHORT" | null = null;
+          if (btSide === "AUTO") {
+            if (action === "BUY") fSide = "LONG";
+            if (action === "SELL") fSide = "SHORT";
+          } else if (btSide === "LONG" && action === "BUY") {
+            fSide = "LONG";
+          } else if (btSide === "SHORT" && action === "SELL") {
+            fSide = "SHORT";
+          }
+
+          /* close opposite position first */
+          if (existingPos && fSide && ((existingPos.side === "LONG" && fSide === "SHORT") || (existingPos.side === "SHORT" && fSide === "LONG"))) {
+            const pnl = existingPos.side === "LONG"
+              ? ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage
+              : ((existingPos.entry - price) / existingPos.entry) * existingPos.margin * existingPos.leverage;
+            const closeFee = existingPos.notional * FUT_FEE;
+            balance += existingPos.margin + pnl - closeFee;
+            trades.push({ time, sym, action: `CLOSE ${existingPos.side}`, price, amount: existingPos.notional, fee: closeFee, reason: `Flip → ${fSide}`, balance, pnl });
+            openPositions.splice(openPositions.indexOf(existingPos), 1);
+          }
+
+          /* open new position if no same-direction position exists */
+          const samePos = openPositions.find((p) => p.sym === sym && p.side === fSide);
+          if (fSide && !samePos) {
+            const notional = amtPerTrade;
+            const margin = notional / leverage;
+            const openFee = notional * FUT_FEE;
+            if (margin + openFee > balance) { lastAction[sym] = action; return; }
+            balance -= margin + openFee;
+            const sl = slPct > 0 ? (fSide === "LONG" ? price * (1 - slPct / 100) : price * (1 + slPct / 100)) : undefined;
+            const tp = tpPct > 0 ? (fSide === "LONG" ? price * (1 + tpPct / 100) : price * (1 - tpPct / 100)) : undefined;
+            openPositions.push({ sym, side: fSide, entry: price, margin, notional, leverage, sl, tp });
+            trades.push({ time, sym, action: `OPEN ${fSide}`, price, amount: notional, fee: openFee, reason, balance });
+          }
+          lastAction[sym] = action;
+        });
+
+        /* record equity */
+        if (i % 10 === 0 || i === maxLen - 1) {
+          let eq = balance;
+          openPositions.forEach((pos) => {
+            const c = candleMap[pos.sym];
+            if (!c) return;
+            const cp = c[Math.min(i, c.length - 1)]?.c || pos.entry;
+            const pnl = pos.side === "LONG"
+              ? ((cp - pos.entry) / pos.entry) * pos.margin * pos.leverage
+              : ((pos.entry - cp) / pos.entry) * pos.margin * pos.leverage;
+            eq += pos.margin + pnl;
+          });
+          const t = candleMap[btSymbols[0]]?.[Math.min(i, (candleMap[btSymbols[0]]?.length || 1) - 1)]?.t || 0;
+          equity.push({ t, v: eq });
+        }
+      }
+
+      /* close remaining futures at last price */
+      openPositions.forEach((pos) => {
+        const c = candleMap[pos.sym];
+        const lp = c?.[c.length - 1]?.c || pos.entry;
+        const pnl = pos.side === "LONG"
+          ? ((lp - pos.entry) / pos.entry) * pos.margin * pos.leverage
+          : ((pos.entry - lp) / pos.entry) * pos.margin * pos.leverage;
+        const closeFee = pos.notional * FUT_FEE;
+        balance += pos.margin + pnl - closeFee;
+      });
+    }
+
+    /* calc stats */
+    let peak = startBal, maxDd = 0;
+    equity.forEach((e) => { if (e.v > peak) peak = e.v; const dd = (peak - e.v) / peak * 100; if (dd > maxDd) maxDd = dd; });
+    const closeTrades = trades.filter((t) => t.action.startsWith("SELL") || t.action.startsWith("CLOSE") || t.action.startsWith("SL") || t.action.startsWith("TP"));
+    const wins = closeTrades.filter((t) => (t.pnl !== undefined ? t.pnl > 0 : false) || (t.action === "SELL" && (() => { const pb = [...trades].slice(0, trades.indexOf(t)).reverse().find((b) => b.action === "BUY" && b.sym === t.sym); return pb ? t.price > pb.price : false; })()));
+    const winRate = closeTrades.length > 0 ? (wins.length / closeTrades.length) * 100 : 0;
+
+    setBtResult({ trades, finalBalance: balance, startBalance: startBal, maxDrawdown: maxDd, winRate, totalTrades: trades.length, equity, liquidations, instrument: btInstrument });
+    setBtProgress("");
+    setBtRunning(false);
+  };
+
   /* ---- spot form ---- */
   const [sSym, setSSym] = useState("BTCUSDT");
   const [sSide, setSSide] = useState("BUY");
@@ -968,9 +1288,9 @@ export default function TradingApp() {
 
       {/* ═══ NAV ═══ */}
       <div className="grid grid-cols-4 sm:flex gap-1 mb-3 sm:flex-wrap">
-        {["market", "trade", "portfolio", "trades", "signals", "strategy", "compare"].map((v) => (
-          <button key={v} onClick={() => setView(v)} className={`px-2 sm:px-3 py-1.5 rounded text-[10px] sm:text-xs font-semibold uppercase transition cursor-pointer ${view === v ? (v === "strategy" ? "bg-yellow-500 text-black" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>
-            {v === "market" ? "Ринок" : v === "trade" ? "Торгівля" : v === "portfolio" ? "Портфель" : v === "trades" ? "Угоди" : v === "signals" ? "Сигнали" : v === "strategy" ? "⚡ Стратегія" : "Порівняння"}
+        {["market", "trade", "portfolio", "trades", "signals", "strategy", "backtest", "compare"].map((v) => (
+          <button key={v} onClick={() => setView(v)} className={`px-2 sm:px-3 py-1.5 rounded text-[10px] sm:text-xs font-semibold uppercase transition cursor-pointer ${view === v ? (v === "strategy" ? "bg-yellow-500 text-black" : v === "backtest" ? "bg-purple-600 text-white" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>
+            {v === "market" ? "Ринок" : v === "trade" ? "Торгівля" : v === "portfolio" ? "Портфель" : v === "trades" ? "Угоди" : v === "signals" ? "Сигнали" : v === "strategy" ? "⚡ Стратегія" : v === "backtest" ? "📊 Бектест" : "Порівняння"}
           </button>
         ))}
       </div>
@@ -1185,6 +1505,214 @@ export default function TradingApp() {
                   <tr key={i} className="border-t border-[#222]"><td className="py-1 text-gray-400">{l.time}</td><td className="py-1 text-yellow-400">{NICE[l.sym]}</td><td className={`py-1 font-bold ${l.action === "BUY" ? "text-green-400" : "text-red-400"}`}>{l.action}</td><td className="py-1 text-right">${fmt(l.price, l.price < 1 ? 4 : 2)}</td><td className="py-1 text-right">${fmt(l.amount)}</td><td className="py-1 text-gray-500">{l.reason}</td></tr>
                 ))}</tbody></table></div>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══ BACKTEST ═══ */}
+      {view === "backtest" && (
+        <div className="space-y-3">
+          <div className={card}>
+            <h2 className="text-purple-400 font-bold text-sm mb-3">📊 БЕКТЕСТ СТРАТЕГІЙ</h2>
+            <p className="text-[10px] text-gray-600 mb-3">Протестуй стратегію на історичних даних Binance. Вибери параметри і натисни &quot;Запустити&quot;.</p>
+
+            {/* Instrument toggle */}
+            <div className="flex gap-2 mb-3">
+              {(["SPOT", "FUTURES"] as const).map((inst) => (
+                <button key={inst} onClick={() => setBtInstrument(inst)} className={`px-4 py-1.5 rounded text-xs font-bold transition cursor-pointer ${btInstrument === inst ? (inst === "FUTURES" ? "bg-yellow-500 text-black" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400 border border-[#333]"}`}>
+                  {inst}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+              {/* Strategy */}
+              <div>
+                <label className="text-[10px] text-gray-500 block mb-1">СТРАТЕГІЯ</label>
+                <select value={btStrategy} onChange={(e) => setBtStrategy(e.target.value)} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                  {Object.entries(STRATEGIES).filter(([k]) => k !== "none").map(([k, v]) => (
+                    <option key={k} value={k}>{v.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Timeframe */}
+              <div>
+                <label className="text-[10px] text-gray-500 block mb-1">ТАЙМФРЕЙМ</label>
+                <select value={btTimeframe} onChange={(e) => setBtTimeframe(e.target.value)} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                  {Object.entries(TIMEFRAMES).map(([k, v]) => (
+                    <option key={k} value={k}>{v.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Period */}
+              <div>
+                <label className="text-[10px] text-gray-500 block mb-1">ПЕРІОД</label>
+                <select value={btPeriod} onChange={(e) => setBtPeriod(e.target.value)} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                  {Object.entries(BT_PERIODS).map(([k, v]) => (
+                    <option key={k} value={k}>{v.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Start Balance */}
+              <div>
+                <label className="text-[10px] text-gray-500 block mb-1">СТАРТОВИЙ БАЛАНС ($)</label>
+                <input type="number" value={btBalance} onChange={(e) => setBtBalance(e.target.value)} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white" />
+              </div>
+
+              {/* Amount per trade */}
+              <div>
+                <label className="text-[10px] text-gray-500 block mb-1">{btInstrument === "FUTURES" ? "NOTIONAL ($)" : "СУМА НА УГОДУ ($)"}</label>
+                <input type="number" value={btAmount} onChange={(e) => setBtAmount(e.target.value)} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white" />
+              </div>
+
+              {/* Futures-only fields */}
+              {btInstrument === "FUTURES" && (
+                <>
+                  <div>
+                    <label className="text-[10px] text-gray-500 block mb-1">ПЛЕЧЕ</label>
+                    <select value={btLeverage} onChange={(e) => setBtLeverage(Number(e.target.value))} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                      {LEVERAGES.map((l) => <option key={l} value={l}>x{l}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 block mb-1">НАПРЯМОК</label>
+                    <select value={btSide} onChange={(e) => setBtSide(e.target.value as "AUTO" | "LONG" | "SHORT")} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                      <option value="AUTO">AUTO (BUY→LONG, SELL→SHORT)</option>
+                      <option value="LONG">Тільки LONG</option>
+                      <option value="SHORT">Тільки SHORT</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 block mb-1">STOP LOSS (%)</label>
+                    <input type="number" value={btSl} onChange={(e) => setBtSl(e.target.value)} placeholder="напр. 5" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 block mb-1">TAKE PROFIT (%)</label>
+                    <input type="number" value={btTp} onChange={(e) => setBtTp(e.target.value)} placeholder="напр. 10" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Symbol selector */}
+            <div className="mb-3">
+              <label className="text-[10px] text-gray-500 block mb-1">МОНЕТИ</label>
+              <div className="flex flex-wrap gap-2">
+                {SYMBOLS.map((sym) => (
+                  <button key={sym} onClick={() => setBtSymbols((p) => p.includes(sym) ? p.filter((s) => s !== sym) : [...p, sym])} className={`px-2 py-1 rounded text-[10px] font-semibold transition cursor-pointer ${btSymbols.includes(sym) ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400 border border-[#333]"}`}>
+                    {NICE[sym]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button onClick={runBacktest} disabled={btRunning || btSymbols.length === 0} className="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold text-xs px-6 py-2 rounded transition cursor-pointer">
+              {btRunning ? btProgress || "Завантаження..." : "🚀 ЗАПУСТИТИ БЕКТЕСТ"}
+            </button>
+          </div>
+
+          {/* Results */}
+          {btResult && (
+            <>
+              {/* Stats */}
+              <div className={card}>
+                <h3 className="text-purple-400 font-bold text-sm mb-3">РЕЗУЛЬТАТИ</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">СТАРТОВИЙ БАЛАНС</div>
+                    <div className="text-white font-bold">${fmt(btResult.startBalance)}</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">ФІНАЛЬНИЙ БАЛАНС</div>
+                    <div className={`font-bold ${btResult.finalBalance >= btResult.startBalance ? "text-green-400" : "text-red-400"}`}>${fmt(btResult.finalBalance)}</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">P&L</div>
+                    <div className={`font-bold ${btResult.finalBalance >= btResult.startBalance ? "text-green-400" : "text-red-400"}`}>
+                      {btResult.finalBalance >= btResult.startBalance ? "+" : ""}${fmt(btResult.finalBalance - btResult.startBalance)} ({fmtP((btResult.finalBalance - btResult.startBalance) / btResult.startBalance * 100)})
+                    </div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">УГОД</div>
+                    <div className="text-white font-bold">{btResult.totalTrades}</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">WIN RATE</div>
+                    <div className={`font-bold ${btResult.winRate >= 50 ? "text-green-400" : "text-red-400"}`}>{fmt(btResult.winRate, 1)}%</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">МАКС. ПРОСАДКА</div>
+                    <div className="text-red-400 font-bold">-{fmt(btResult.maxDrawdown, 1)}%</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">СТРАТЕГІЯ</div>
+                    <div className="text-yellow-400 font-bold text-[10px]">{STRATEGIES[btStrategy]?.name}</div>
+                  </div>
+                  <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                    <div className="text-gray-500 text-[10px] mb-1">РЕЖИМ</div>
+                    <div className="text-white font-bold text-[10px]">{btResult.instrument}{btResult.instrument === "FUTURES" ? ` x${btLeverage}` : ""} · {BT_PERIODS[btPeriod]?.label} · {TIMEFRAMES[btTimeframe]?.label}</div>
+                  </div>
+                  {btResult.instrument === "FUTURES" && btResult.liquidations > 0 && (
+                    <div className="bg-[#1a1a1a] rounded p-2 text-center">
+                      <div className="text-gray-500 text-[10px] mb-1">ЛІКВІДАЦІЙ</div>
+                      <div className="text-red-500 font-bold">{btResult.liquidations}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Equity chart (ASCII-style bar chart) */}
+              {btResult.equity.length > 1 && (
+                <div className={card}>
+                  <h3 className="text-purple-400 font-bold text-sm mb-3">EQUITY КРИВА</h3>
+                  <div className="h-40 flex items-end gap-[1px] overflow-hidden">
+                    {(() => {
+                      const eq = btResult.equity;
+                      const minV = Math.min(...eq.map((e) => e.v));
+                      const maxV = Math.max(...eq.map((e) => e.v));
+                      const range = maxV - minV || 1;
+                      /* downsample to max 200 bars */
+                      const step = Math.max(1, Math.floor(eq.length / 200));
+                      const sampled = eq.filter((_, i) => i % step === 0 || i === eq.length - 1);
+                      return sampled.map((e, i) => {
+                        const h = ((e.v - minV) / range) * 100;
+                        const color = e.v >= btResult.startBalance ? "bg-green-500" : "bg-red-500";
+                        return <div key={i} className={`${color} rounded-t-[1px] min-w-[2px]`} style={{ height: `${Math.max(h, 2)}%`, flex: 1 }} title={`$${fmt(e.v)} · ${new Date(e.t).toLocaleDateString("uk-UA")}`} />;
+                      });
+                    })()}
+                  </div>
+                  <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+                    <span>{new Date(btResult.equity[0].t).toLocaleDateString("uk-UA")}</span>
+                    <span className="text-gray-500">${fmt(Math.min(...btResult.equity.map((e) => e.v)))} — ${fmt(Math.max(...btResult.equity.map((e) => e.v)))}</span>
+                    <span>{new Date(btResult.equity[btResult.equity.length - 1].t).toLocaleDateString("uk-UA")}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Trades list */}
+              <div className={card}>
+                <h3 className="text-purple-400 font-bold text-sm mb-3">УГОДИ ({btResult.trades.length})</h3>
+                {btResult.trades.length === 0 ? <p className="text-gray-600 text-xs">Стратегія не здійснила жодної угоди за цей період</p> : (
+                  <div className="overflow-x-auto max-h-80 overflow-y-auto"><table className="w-full text-xs"><thead><tr className="text-gray-500 sticky top-0 bg-[#111]"><th className="text-left py-1">ДАТА</th><th className="text-left py-1">МОНЕТА</th><th className="text-left py-1">ТИП</th><th className="text-right py-1">ЦІНА</th><th className="text-right py-1">СУМА</th><th className="text-right py-1">КОМІСІЯ</th>{btResult.instrument === "FUTURES" && <th className="text-right py-1">PnL</th>}<th className="text-left py-1">ПРИЧИНА</th><th className="text-right py-1">БАЛАНС</th></tr></thead>
+                    <tbody>{btResult.trades.map((t, i) => (
+                      <tr key={i} className={`border-t border-[#222] ${t.action.startsWith("LIQ") ? "bg-red-950/30" : ""}`}>
+                        <td className="py-1 text-gray-400 whitespace-nowrap">{new Date(t.time).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                        <td className="py-1 text-yellow-400">{NICE[t.sym]}</td>
+                        <td className={`py-1 font-semibold ${t.action.includes("BUY") || t.action.includes("LONG") || t.action.includes("TP") ? "text-green-400" : t.action.includes("LIQ") ? "text-red-500 animate-pulse" : "text-red-400"}`}>{t.action}</td>
+                        <td className="py-1 text-right">${fmt(t.price, t.price < 1 ? 4 : 2)}</td>
+                        <td className="py-1 text-right">${fmt(t.amount)}</td>
+                        <td className="py-1 text-right text-gray-500">${fmt(t.fee, 4)}</td>
+                        {btResult.instrument === "FUTURES" && <td className={`py-1 text-right font-semibold ${t.pnl !== undefined ? (t.pnl >= 0 ? "text-green-400" : "text-red-400") : "text-gray-600"}`}>{t.pnl !== undefined ? `${t.pnl >= 0 ? "+" : ""}$${fmt(t.pnl)}` : "—"}</td>}
+                        <td className="py-1 text-gray-400 text-[10px]">{t.reason}</td>
+                        <td className="py-1 text-right text-white">${fmt(t.balance)}</td>
+                      </tr>
+                    ))}</tbody></table></div>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}
