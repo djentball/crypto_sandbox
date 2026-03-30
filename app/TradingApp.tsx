@@ -6,7 +6,7 @@ const fmt = (n: number, d = 2) =>
   Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtP = (n: number) => `${n >= 0 ? "+" : ""}${fmt(n)}%`;
 const uid = () => Math.random().toString(36).slice(2, 10);
-const ts = () => new Date().toLocaleTimeString("uk-UA", { hour12: false });
+const ts = () => new Date().toLocaleString("uk-UA", { hour12: false, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
 const NICE: Record<string, string> = { BTCUSDT: "BTC", ETHUSDT: "ETH", SOLUSDT: "SOL", BNBUSDT: "BNB", XRPUSDT: "XRP" };
@@ -803,6 +803,11 @@ export default function TradingApp() {
           uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
           api.recordTrade(uc.id, trade);
           api.recordStrategyLog(uc.id, logEntry);
+        } else if (action === "BUY") {
+          /* BUY signal but insufficient balance — log signal to reset anti-repeat */
+          const logEntry = { time, sym, action: "BUY", price, amount: 0, reason: reason + " (недостатньо коштів)" };
+          uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
+          api.recordStrategyLog(uc.id, logEntry);
         } else if (action === "SELL") {
           const held = uc.spot[sym] || 0;
           const sellQty = Math.min(amt / price, held);
@@ -817,6 +822,11 @@ export default function TradingApp() {
             const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordTrade(uc.id, trade);
+            api.recordStrategyLog(uc.id, logEntry);
+          } else {
+            /* SELL signal but no holdings — log signal to reset anti-repeat */
+            const logEntry = { time, sym, action: "SELL", price, amount: 0, reason: reason + " (немає позиції)" };
+            uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordStrategyLog(uc.id, logEntry);
           }
         }
