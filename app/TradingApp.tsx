@@ -164,6 +164,7 @@ export default function TradingApp() {
         });
         return n;
       });
+      tickRef.current += 1; /* trigger strategy re-evaluation */
     } catch { /* ignore */ }
   }, []);
 
@@ -587,16 +588,19 @@ export default function TradingApp() {
     return pts;
   };
 
-  /* BOS (Break of Structure): ціна пробиває останній swing high/low */
+  /* BOS (Break of Structure): ціна пробиває останній swing high/low (тільки свіжий пробій) */
   const detectBOS = (candles: Candle[], swings: SwingPoint[]): "bullish" | "bearish" | null => {
-    if (candles.length < 5 || swings.length < 2) return null;
+    if (candles.length < 6 || swings.length < 2) return null;
     const last = candles[candles.length - 1];
+    const prev = candles[candles.length - 2];
     const highs = swings.filter((s) => s.type === "HH" || s.type === "LH");
     const lows = swings.filter((s) => s.type === "HL" || s.type === "LL");
     const lastHigh = highs[highs.length - 1];
     const lastLow = lows[lows.length - 1];
-    if (lastHigh && last.c > lastHigh.price) return "bullish";
-    if (lastLow && last.c < lastLow.price) return "bearish";
+    /* bullish BOS: current candle breaks above, previous didn't */
+    if (lastHigh && last.c > lastHigh.price && prev.c <= lastHigh.price) return "bullish";
+    /* bearish BOS: current candle breaks below, previous didn't */
+    if (lastLow && last.c < lastLow.price && prev.c >= lastLow.price) return "bearish";
     return null;
   };
 
@@ -732,10 +736,17 @@ export default function TradingApp() {
       const tfCandleMap = tf === "15m" ? candleHistory : (tfCandles[tf] || {});
 
       st.symbols.forEach((sym) => {
-        const tfCandlesForSym = tfCandleMap[sym] || candleHistory[sym] || [];
+        /* skip if correct timeframe data isn't loaded yet */
+        if (tf !== "15m" && (!tfCandles[tf] || !tfCandles[tf][sym])) return;
+        const tfCandlesForSym = tfCandleMap[sym] || [];
+        if (tfCandlesForSym.length < 5) return;
         const h = tfCandlesForSym.map((c: Candle) => c.c);
         const price = prices[sym];
         if (!price) return;
+
+        /* anti-repeat: skip if last log entry for this symbol is the same direction */
+        const lastLog = uc.strategy.log.find((l: any) => l.sym === sym);
+
         const rsi = calcRSI(h);
         let action: string | null = null;
         let reason = "";
@@ -776,6 +787,9 @@ export default function TradingApp() {
         }
         if (!action) return;
 
+        /* anti-repeat: don't repeat the same action twice in a row for same symbol */
+        if (lastLog && lastLog.action === action) return;
+
         const amt = st.amountPerTrade;
         const time = ts();
         if (action === "BUY" && uc.balance >= amt) {
@@ -810,7 +824,7 @@ export default function TradingApp() {
       api.updateUser(uc.id, { balance: uc.balance, spot: uc.spot, futures: uc.futures });
       return uc;
     }));
-  }, [prices, priceHistory]);
+  }, [prices, priceHistory, tfCandles]);
 
   /* ---- equity ---- */
   const calcEquity = (u: User) => {

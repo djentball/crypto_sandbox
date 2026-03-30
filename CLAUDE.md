@@ -22,36 +22,35 @@ package.json
 tsconfig.json
 postcss.config.mjs
 next.config.ts
-src/
-  app/
-    globals.css                — Tailwind imports + theme
-    layout.tsx                 — root layout with JetBrains Mono font
-    page.tsx                   — entry point, renders TradingApp
-    TradingApp.tsx             — main client component (all UI + trading logic)
-    api/
-      users/
-        route.ts               — GET (list), POST (create), DELETE
-        [id]/route.ts          — PATCH (update balance/spot/futures)
-      trades/
-        route.ts               — GET (by userId), POST (record)
-      strategies/
-        route.ts               — GET (log), POST (log entry), PATCH (update config)
-  lib/
-    db.ts                      — Neon connection helper
-    constants.ts               — shared constants (SYMBOLS, fees, etc.)
-    migrate.mjs                — database migration script
+app/
+  globals.css                — Tailwind imports + theme
+  layout.tsx                 — root layout with JetBrains Mono font
+  page.tsx                   — entry point, renders TradingApp
+  TradingApp.tsx             — main client component (all UI + trading logic)
+  api/
+    users/
+      route.ts               — GET (list), POST (create), DELETE
+      [id]/route.ts          — PATCH (update balance/spot/futures)
+    trades/
+      route.ts               — GET (by userId), POST (record)
+    strategies/
+      route.ts               — GET (log), POST (log entry), PATCH (update config)
+lib/
+  db.ts                      — Neon connection helper
+  constants.ts               — shared constants (SYMBOLS, fees, etc.)
+  migrate.mjs                — database migration script
 ```
 
 ## Architecture
 ### Client-Server Split
-- **Client**: prices from Binance, trading logic, signal calculations (RSI, SMA), auto-strategy engine
+- **Client**: prices from Binance OHLC klines, trading logic, signal calculations (RSI, MACD, SMC), auto-strategy engine
 - **Server**: user persistence, trade history, strategy config via API routes
 - State syncs to DB on every trade + debounced balance updates
 
 ### Database Schema (Neon Postgres)
 - `users` — id, name, start_bal, balance, spot (JSONB), futures (JSONB)
 - `trades` — id, user_id, time, symbol, instrument, side, price, amount, fee, qty
-- `strategies` — user_id, type, symbols (JSONB), amount_per_trade, active
+- `strategies` — user_id, type, symbols (JSONB), amount_per_trade, timeframe, active
 - `strategy_log` — user_id, time, symbol, action, price, amount, reason
 
 ### Data Flow
