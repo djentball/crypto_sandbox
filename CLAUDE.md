@@ -37,7 +37,7 @@ app/
       route.ts               — GET (log), POST (log entry), PATCH (update config)
 lib/
   db.ts                      — Neon connection helper
-  constants.ts               — shared constants (SYMBOLS, fees, etc.)
+  (constants.ts removed — all constants are in TradingApp.tsx)
   migrate.mjs                — database migration script
 ```
 
@@ -83,11 +83,15 @@ lib/
   - BOS (Break of Structure): detects swing highs/lows, signals when price breaks last swing point
   - FVG (Fair Value Gap): finds 3-candle imbalances (high[0] < low[2] for bull, low[0] > high[2] for bear), signals when price enters gap
   - Order Blocks: identifies last opposite candle before a strong impulsive move, signals when price returns to OB zone
+- **EMA Crossover**: EMA(9) vs EMA(21), BUY when fast crosses above slow, SELL when crosses below
+- **Bollinger Bands**: SMA(20) ± 2*StdDev, mean reversion: BUY at lower band, SELL at upper band
+- **Stochastic RSI**: Stochastic oscillator applied to RSI values, BUY when StochRSI crosses above 20, SELL when crosses below 80
 
 ### Auto-Strategy Engine
 Each user has a `strategy` object:
 ```
-{ type, symbols: [], amountPerTrade, timeframe: "15m"|"1h"|"4h", active: bool, log: [] }
+{ type, symbols: [], amountPerTrade, timeframe: "15m"|"1h"|"4h", active: bool, log: [],
+  instrument: "SPOT"|"FUTURES", leverage: number, slPct: number, tpPct: number }
 ```
 **Available strategies** (defined in `STRATEGIES` object):
 - `none` — manual trading (default)
@@ -97,12 +101,23 @@ Each user has a `strategy` object:
 - `smc_fvg` — SMC Fair Value Gap: BUY when price enters bullish FVG, SELL when enters bearish FVG
 - `smc_bos` — SMC Break of Structure: BUY on bullish BOS, SELL on bearish BOS
 - `smc_ob` — SMC Order Block: BUY when price returns to bullish OB, SELL when returns to bearish OB
+- `ema_cross` — EMA Crossover: BUY when EMA(9) crosses above EMA(21), SELL when crosses below
+- `bbands` — Bollinger Bands: BUY when price breaks below lower band, SELL when breaks above upper band
+- `stoch_rsi` — Stochastic RSI: BUY when StochRSI crosses above 20, SELL when crosses below 80
+- `scalp_pa` — Scalp Price Action: detects double bottom/top, ascending/descending triangles near 4H support/resistance levels
+- `scalp_smc_ind` — Scalp SMC Inducement: false breakout of liquidity zone + imbalance engulfing candle (from Binance Square article)
+- `scalp_sma_ema` — Scalp SMA(5)×EMA(9): BUY when SMA(5) crosses EMA(9) from below, SELL when crosses from above
 
 **Timeframes**: each user can select 15m, 1h, or 4h candle timeframe for their strategy.
 Higher timeframes reduce noise but produce fewer signals. Candle data is fetched from Binance klines API.
 
+**Instrument**: users can choose SPOT or FUTURES for auto-trading.
+FUTURES mode uses the configured leverage, SL%, and TP% (same as backtest params).
+In FUTURES mode, the engine opens LONG on BUY signals, SHORT on SELL signals,
+flips positions on opposite signals, and auto-closes on SL/TP/liquidation.
+
 **Execution**: on every price tick, for each user with `strategy.active === true`,
-the engine evaluates signals for each selected symbol and executes SPOT trades.
+the engine evaluates signals for each selected symbol and executes trades.
 Auto-trades are marked `[AUTO]` in the trade history.
 Strategy log stores last 50 entries with timestamp, symbol, action, price, reason.
 
@@ -141,8 +156,8 @@ npm run dev                   # http://localhost:3000
 - `DATABASE_URL` — Neon Postgres connection string (set automatically by Vercel+Neon integration)
 
 ## Common Tasks
-- **Add a coin**: add to `SYMBOLS`, `NICE`, and `MOCK_BASE` in `TradingApp.tsx` + `constants.ts`
-- **Change fee**: update `SPOT_FEE` or `FUT_FEE` in `TradingApp.tsx` + `constants.ts`
+- **Add a coin**: add to `SYMBOLS`, `NICE`, and `MOCK_BASE` in `TradingApp.tsx`
+- **Change fee**: update `SPOT_FEE` or `FUT_FEE` in `TradingApp.tsx`
 - **Add leverage option**: append to `LEVERAGES` array
 - **New view/tab**: add to the nav `map` array and add a conditional render block in `TradingApp.tsx`
 - **Add strategy**: add to `STRATEGIES` object + add logic branch in the strategy engine `useEffect`

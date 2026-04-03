@@ -28,6 +28,9 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   ema_cross: { name: "EMA Crossover", desc: "BUY коли EMA(9) перетинає EMA(21) знизу, SELL — зверху" },
   bbands:    { name: "Bollinger Bands", desc: "BUY при пробої нижньої смуги, SELL — верхньої (mean reversion)" },
   stoch_rsi: { name: "Stochastic RSI", desc: "BUY коли StochRSI<20 і росте, SELL коли >80 і падає" },
+  scalp_pa: { name: "Scalp: Price Action", desc: "Патерни (подвійне дно/вершина, трикутники) біля 4H рівнів" },
+  scalp_smc_ind: { name: "Scalp: SMC Inducement", desc: "Хибний пробій ліквідність-зони + імбалансна свічка поглинання" },
+  scalp_sma_ema: { name: "Scalp: SMA(5)×EMA(9)", desc: "BUY коли SMA(5) перетинає EMA(9) знизу, SELL — зверху" },
 };
 
 const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
@@ -467,6 +470,16 @@ export default function TradingApp() {
         if (sr.prevK <= 20 && sr.k > 20) return { action: "BUY", reason: `StochRSI cross ▲ 20 (${fmt(sr.k,1)})` };
         if (sr.prevK >= 80 && sr.k < 80) return { action: "SELL", reason: `StochRSI cross ▼ 80 (${fmt(sr.k,1)})` };
       }
+    } else if (strat === "scalp_pa") {
+      const sig = detectPriceActionPattern(slice);
+      if (sig === "bullish") return { action: "BUY", reason: "PA Pattern ▲ (4H support)" };
+      if (sig === "bearish") return { action: "SELL", reason: "PA Pattern ▼ (4H resistance)" };
+    } else if (strat === "scalp_smc_ind") {
+      const sig = detectSMCInducement(slice);
+      if (sig === "bullish") return { action: "BUY", reason: "SMC Inducement ▲ (imbalance)" };
+      if (sig === "bearish") return { action: "SELL", reason: "SMC Inducement ▼ (imbalance)" };
+    } else if (strat === "scalp_sma_ema") {
+      return detectSMA5xEMA9(h);
     }
     return null;
   };
@@ -1049,6 +1062,145 @@ export default function TradingApp() {
     return null;
   };
 
+  /* ── Scalp Strategy 1: Price Action patterns near 4H key levels ── */
+  /* Detects: double bottom/top, ascending/descending triangles near support/resistance */
+  const detectPriceActionPattern = (candles: Candle[]): "bullish" | "bearish" | null => {
+    if (candles.length < 20) return null;
+    const recent = candles.slice(-20);
+    const last = recent[recent.length - 1];
+
+    /* identify 4H-level support/resistance from broader history */
+    const lookback = candles.slice(-100);
+    const highs = lookback.map((c) => c.h).sort((a, b) => b - a);
+    const lows = lookback.map((c) => c.l).sort((a, b) => a - b);
+    /* cluster top/bottom 10% as resistance/support zones */
+    const resistanceZone = highs[Math.floor(highs.length * 0.05)];
+    const supportZone = lows[Math.floor(lows.length * 0.05)];
+    const range = resistanceZone - supportZone || 1;
+    const tolerance = range * 0.02;
+
+    const nearSupport = last.c <= supportZone + tolerance * 3;
+    const nearResistance = last.c >= resistanceZone - tolerance * 3;
+
+    if (!nearSupport && !nearResistance) return null;
+
+    /* detect double bottom (bullish) near support */
+    if (nearSupport) {
+      const localLows: number[] = [];
+      for (let i = 2; i < recent.length - 2; i++) {
+        if (recent[i].l < recent[i - 1].l && recent[i].l < recent[i - 2].l &&
+            recent[i].l < recent[i + 1].l && recent[i].l < recent[i + 2].l) {
+          localLows.push(recent[i].l);
+        }
+      }
+      /* two lows within tolerance = double bottom */
+      if (localLows.length >= 2) {
+        const l1 = localLows[localLows.length - 2], l2 = localLows[localLows.length - 1];
+        if (Math.abs(l1 - l2) / ((l1 + l2) / 2) < 0.015) {
+          /* neckline breakout: price closes above the high between the two lows */
+          const midHigh = Math.max(...recent.slice(-10).map((c) => c.h));
+          const neckline = midHigh * 0.998;
+          if (last.c > neckline && recent[recent.length - 2].c <= neckline) return "bullish";
+        }
+      }
+      /* ascending triangle near support: rising lows + flat resistance */
+      const last8 = recent.slice(-8);
+      const lowsTrend = last8.map((c) => c.l);
+      const highsFlat = last8.map((c) => c.h);
+      const lowsRising = lowsTrend.every((v, i) => i === 0 || v >= lowsTrend[i - 1] - tolerance);
+      const highsRange = Math.max(...highsFlat) - Math.min(...highsFlat);
+      if (lowsRising && highsRange < range * 0.03 && last.c > Math.max(...highsFlat) * 0.999) return "bullish";
+    }
+
+    /* detect double top (bearish) near resistance */
+    if (nearResistance) {
+      const localHighs: number[] = [];
+      for (let i = 2; i < recent.length - 2; i++) {
+        if (recent[i].h > recent[i - 1].h && recent[i].h > recent[i - 2].h &&
+            recent[i].h > recent[i + 1].h && recent[i].h > recent[i + 2].h) {
+          localHighs.push(recent[i].h);
+        }
+      }
+      if (localHighs.length >= 2) {
+        const h1 = localHighs[localHighs.length - 2], h2 = localHighs[localHighs.length - 1];
+        if (Math.abs(h1 - h2) / ((h1 + h2) / 2) < 0.015) {
+          const midLow = Math.min(...recent.slice(-10).map((c) => c.l));
+          const neckline = midLow * 1.002;
+          if (last.c < neckline && recent[recent.length - 2].c >= neckline) return "bearish";
+        }
+      }
+      /* descending triangle near resistance */
+      const last8 = recent.slice(-8);
+      const highsTrend = last8.map((c) => c.h);
+      const lowsFlat = last8.map((c) => c.l);
+      const highsFalling = highsTrend.every((v, i) => i === 0 || v <= highsTrend[i - 1] + tolerance);
+      const lowsRange = Math.max(...lowsFlat) - Math.min(...lowsFlat);
+      if (highsFalling && lowsRange < range * 0.03 && last.c < Math.min(...lowsFlat) * 1.001) return "bearish";
+    }
+    return null;
+  };
+
+  /* ── Scalp Strategy 2: SMC Inducement (false breakout + imbalance engulfing candle) ── */
+  const detectSMCInducement = (candles: Candle[]): "bullish" | "bearish" | null => {
+    if (candles.length < 20) return null;
+
+    /* identify liquidity zones from broader data */
+    const lookback = candles.slice(-100);
+    const sortedHighs = lookback.map((c) => c.h).sort((a, b) => b - a);
+    const sortedLows = lookback.map((c) => c.l).sort((a, b) => a - b);
+    const resistanceLevel = sortedHighs[Math.floor(sortedHighs.length * 0.05)];
+    const supportLevel = sortedLows[Math.floor(sortedLows.length * 0.05)];
+
+    const recent = candles.slice(-5);
+    const last = recent[recent.length - 1]; /* current candle */
+    const prev = recent[recent.length - 2]; /* previous candle */
+    const prev2 = recent[recent.length - 3]; /* candle before that */
+
+    /* Bullish inducement: false break below support + bullish imbalance engulfing */
+    /* Inducement = prev2 or prev wick below support but close above */
+    const falseBreakDown = (prev2.l < supportLevel && prev2.c > supportLevel) ||
+                           (prev.l < supportLevel && prev.c > supportLevel);
+    if (falseBreakDown) {
+      /* Bullish imbalance: last candle is bullish and its body fully engulfs prev candle's range */
+      const lastBullish = last.c > last.o;
+      const lastBody = last.c - last.o;
+      const prevRange = Math.max(prev.h, prev.o, prev.c) - Math.min(prev.l, prev.o, prev.c);
+      if (lastBullish && lastBody > 0 && lastBody > prevRange &&
+          last.c > Math.max(prev.o, prev.c) && last.o < Math.min(prev.o, prev.c)) {
+        return "bullish";
+      }
+    }
+
+    /* Bearish inducement: false break above resistance + bearish imbalance engulfing */
+    const falseBreakUp = (prev2.h > resistanceLevel && prev2.c < resistanceLevel) ||
+                         (prev.h > resistanceLevel && prev.c < resistanceLevel);
+    if (falseBreakUp) {
+      const lastBearish = last.c < last.o;
+      const lastBody = last.o - last.c;
+      const prevRange = Math.max(prev.h, prev.o, prev.c) - Math.min(prev.l, prev.o, prev.c);
+      if (lastBearish && lastBody > 0 && lastBody > prevRange &&
+          last.o > Math.max(prev.o, prev.c) && last.c < Math.min(prev.o, prev.c)) {
+        return "bearish";
+      }
+    }
+    return null;
+  };
+
+  /* ── Scalp Strategy 3: SMA(5) × EMA(9) Crossover ── */
+  const detectSMA5xEMA9 = (h: number[]): { action: string; reason: string } | null => {
+    if (h.length < 10) return null;
+    const sma5now = calcSMA(h, 5);
+    const ema9now = calcEMA(h, 9);
+    const sma5prev = calcSMA(h.slice(0, -1), 5);
+    const ema9prev = calcEMA(h.slice(0, -1), 9);
+    if (sma5now === null || ema9now === null || sma5prev === null || ema9prev === null) return null;
+    /* SMA(5) crosses EMA(9) from below = bullish */
+    if (sma5prev <= ema9prev && sma5now > ema9now) return { action: "BUY", reason: `SMA5 cross ▲ EMA9 (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
+    /* SMA(5) crosses EMA(9) from above = bearish */
+    if (sma5prev >= ema9prev && sma5now < ema9now) return { action: "SELL", reason: `SMA5 cross ▼ EMA9 (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
+    return null;
+  };
+
   const signals = useMemo(() => {
     return SYMBOLS.map((s) => {
       const h = priceHistory[s] || [];
@@ -1195,6 +1347,17 @@ export default function TradingApp() {
             if (sr.prevK <= 20 && sr.k > 20) { action = "BUY"; reason = `StochRSI cross ▲ 20 (${fmt(sr.k,1)})`; }
             if (sr.prevK >= 80 && sr.k < 80) { action = "SELL"; reason = `StochRSI cross ▼ 80 (${fmt(sr.k,1)})`; }
           }
+        } else if (st.type === "scalp_pa") {
+          const paSig = detectPriceActionPattern(tfCandlesForSym);
+          if (paSig === "bullish") { action = "BUY"; reason = "PA Pattern ▲ (4H support)"; }
+          if (paSig === "bearish") { action = "SELL"; reason = "PA Pattern ▼ (4H resistance)"; }
+        } else if (st.type === "scalp_smc_ind") {
+          const indSig = detectSMCInducement(tfCandlesForSym);
+          if (indSig === "bullish") { action = "BUY"; reason = "SMC Inducement ▲ (imbalance)"; }
+          if (indSig === "bearish") { action = "SELL"; reason = "SMC Inducement ▼ (imbalance)"; }
+        } else if (st.type === "scalp_sma_ema") {
+          const seSig = detectSMA5xEMA9(h);
+          if (seSig) { action = seSig.action; reason = seSig.reason; }
         }
         if (!action) return;
 

@@ -10,9 +10,6 @@ export async function PATCH(
   const body = await req.json();
   const sql = getDb();
 
-  const sets: string[] = [];
-  const vals: Record<string, unknown> = {};
-
   if (body.name !== undefined) {
     await sql`UPDATE users SET name = ${body.name} WHERE id = ${id}`;
   }
