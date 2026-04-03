@@ -4,3 +4,7 @@ node_modules/
 .env.local
 *.tsbuildinfo
 next-env.d.ts
+.bmad/
+_bmad/
+.claude/
+CLAUDE.md
