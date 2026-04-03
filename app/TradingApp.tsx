@@ -25,6 +25,9 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   smc_fvg:   { name: "SMC: Fair Value Gap", desc: "BUY коли ціна входить в бичачий FVG, SELL — у ведмежий" },
   smc_bos:   { name: "SMC: Break of Structure", desc: "BUY при бичачому BOS, SELL при ведмежому BOS" },
   smc_ob:    { name: "SMC: Order Block", desc: "BUY при поверненні в бичачий OB, SELL — у ведмежий OB" },
+  ema_cross: { name: "EMA Crossover", desc: "BUY коли EMA(9) перетинає EMA(21) знизу, SELL — зверху" },
+  bbands:    { name: "Bollinger Bands", desc: "BUY при пробої нижньої смуги, SELL — верхньої (mean reversion)" },
+  stoch_rsi: { name: "Stochastic RSI", desc: "BUY коли StochRSI<20 і росте, SELL коли >80 і падає" },
 };
 
 const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
@@ -51,6 +54,7 @@ interface Future {
 interface Strategy {
   type: string; symbols: string[]; amountPerTrade: number; timeframe: string;
   active: boolean; log: { time: string; sym: string; action: string; price: number; amount: number; reason: string }[];
+  instrument: "SPOT" | "FUTURES"; leverage: number; slPct: number; tpPct: number;
 }
 interface User {
   id: string; name: string; startBal: number; balance: number;
@@ -74,6 +78,10 @@ const api = {
         timeframe: r.strategy_timeframe || "15m",
         active: r.strategy_active || false,
         log: [],
+        instrument: (r.strategy_instrument || "SPOT") as "SPOT" | "FUTURES",
+        leverage: Number(r.strategy_leverage) || 5,
+        slPct: Number(r.strategy_sl_pct) || 3,
+        tpPct: Number(r.strategy_tp_pct) || 15,
       },
     }));
   },
@@ -113,7 +121,7 @@ const api = {
   async updateStrategy(userId: string, s: Partial<Strategy>) {
     await fetch("/api/strategies", {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, type: s.type, symbols: s.symbols, amountPerTrade: s.amountPerTrade, timeframe: s.timeframe, active: s.active }),
+      body: JSON.stringify({ userId, type: s.type, symbols: s.symbols, amountPerTrade: s.amountPerTrade, timeframe: s.timeframe, active: s.active, instrument: s.instrument, leverage: s.leverage, slPct: s.slPct, tpPct: s.tpPct }),
     });
   },
   async getStrategyLog(userId: string) {
@@ -321,7 +329,7 @@ export default function TradingApp() {
     const u: User = {
       id: res.id, name: res.name, startBal: res.startBal, balance: res.balance,
       spot: {}, futures: [], trades: [],
-      strategy: { type: "none", symbols: ["BTCUSDT"], amountPerTrade: 100, timeframe: "15m", active: false, log: [] },
+      strategy: { type: "none", symbols: ["BTCUSDT"], amountPerTrade: 100, timeframe: "15m", active: false, log: [], instrument: "SPOT", leverage: 5, slPct: 3, tpPct: 15 },
     };
     setUsers((p) => [...p, u]);
     setActiveUserId(u.id);
@@ -433,6 +441,32 @@ export default function TradingApp() {
       const sig = detectOB(slice);
       if (sig === "bullish") return { action: "BUY", reason: "Bull OB" };
       if (sig === "bearish") return { action: "SELL", reason: "Bear OB" };
+    } else if (strat === "ema_cross") {
+      if (h.length >= 22) {
+        const ema9now = calcEMA(h, 9);
+        const ema21now = calcEMA(h, 21);
+        const ema9prev = calcEMA(h.slice(0, -1), 9);
+        const ema21prev = calcEMA(h.slice(0, -1), 21);
+        if (ema9now !== null && ema21now !== null && ema9prev !== null && ema21prev !== null) {
+          if (ema9prev <= ema21prev && ema9now > ema21now) return { action: "BUY", reason: `EMA9 cross ▲ EMA21` };
+          if (ema9prev >= ema21prev && ema9now < ema21now) return { action: "SELL", reason: `EMA9 cross ▼ EMA21` };
+        }
+      }
+    } else if (strat === "bbands") {
+      const bb = calcBBands(h, 20, 2);
+      if (bb) {
+        const price = h[h.length - 1];
+        const prevPrice = h.length > 1 ? h[h.length - 2] : price;
+        /* mean reversion: buy when price crosses below lower, sell when crosses above upper */
+        if (prevPrice >= bb.lower && price < bb.lower) return { action: "BUY", reason: `BB Lower ${fmt(bb.lower,2)}` };
+        if (prevPrice <= bb.upper && price > bb.upper) return { action: "SELL", reason: `BB Upper ${fmt(bb.upper,2)}` };
+      }
+    } else if (strat === "stoch_rsi") {
+      const sr = calcStochRSI(h);
+      if (sr) {
+        if (sr.prevK <= 20 && sr.k > 20) return { action: "BUY", reason: `StochRSI cross ▲ 20 (${fmt(sr.k,1)})` };
+        if (sr.prevK >= 80 && sr.k < 80) return { action: "SELL", reason: `StochRSI cross ▼ 80 (${fmt(sr.k,1)})` };
+      }
     }
     return null;
   };
@@ -877,6 +911,37 @@ export default function TradingApp() {
     return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
   };
 
+  /* ── Bollinger Bands helper ── */
+  const calcBBands = (arr: number[], period = 20, mult = 2): { upper: number; middle: number; lower: number } | null => {
+    if (arr.length < period) return null;
+    const slice = arr.slice(-period);
+    const sma = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((a, b) => a + (b - sma) ** 2, 0) / period;
+    const stddev = Math.sqrt(variance);
+    return { upper: sma + mult * stddev, middle: sma, lower: sma - mult * stddev };
+  };
+
+  /* ── Stochastic RSI helper ── */
+  const calcStochRSI = (arr: number[], rsiPeriod = 14, stochPeriod = 14): { k: number; prevK: number } | null => {
+    if (arr.length < rsiPeriod + stochPeriod + 1) return null;
+    /* compute RSI series for the last stochPeriod+1 values */
+    const rsiArr: number[] = [];
+    for (let i = rsiPeriod + 1; i <= arr.length; i++) {
+      const r = calcRSI(arr.slice(0, i), rsiPeriod);
+      if (r !== null) rsiArr.push(r);
+    }
+    if (rsiArr.length < stochPeriod + 1) return null;
+    const recentRSI = rsiArr.slice(-stochPeriod);
+    const prevRSI = rsiArr.slice(-(stochPeriod + 1), -1);
+    const minR = Math.min(...recentRSI), maxR = Math.max(...recentRSI);
+    const minP = Math.min(...prevRSI), maxP = Math.max(...prevRSI);
+    const range = maxR - minR || 1;
+    const rangeP = maxP - minP || 1;
+    const k = ((recentRSI[recentRSI.length - 1] - minR) / range) * 100;
+    const prevK = ((prevRSI[prevRSI.length - 1] - minP) / rangeP) * 100;
+    return { k, prevK };
+  };
+
   /* ── SMC (Smart Money Concepts) helpers ── */
   interface SwingPoint { idx: number; price: number; type: "HH" | "HL" | "LH" | "LL" | "H" | "L"; }
   interface FVG { type: "bull" | "bear"; top: number; bottom: number; idx: number; }
@@ -1105,6 +1170,31 @@ export default function TradingApp() {
           const obSignal = detectOB(tfCandlesForSym);
           if (obSignal === "bullish") { action = "BUY"; reason = "Bull Order Block"; }
           if (obSignal === "bearish") { action = "SELL"; reason = "Bear Order Block"; }
+        } else if (st.type === "ema_cross") {
+          if (h.length >= 22) {
+            const ema9now = calcEMA(h, 9);
+            const ema21now = calcEMA(h, 21);
+            const ema9prev = calcEMA(h.slice(0, -1), 9);
+            const ema21prev = calcEMA(h.slice(0, -1), 21);
+            if (ema9now !== null && ema21now !== null && ema9prev !== null && ema21prev !== null) {
+              if (ema9prev <= ema21prev && ema9now > ema21now) { action = "BUY"; reason = "EMA9 cross ▲ EMA21"; }
+              if (ema9prev >= ema21prev && ema9now < ema21now) { action = "SELL"; reason = "EMA9 cross ▼ EMA21"; }
+            }
+          }
+        } else if (st.type === "bbands") {
+          const bb = calcBBands(h, 20, 2);
+          if (bb) {
+            const p = h[h.length - 1];
+            const pp = h.length > 1 ? h[h.length - 2] : p;
+            if (pp >= bb.lower && p < bb.lower) { action = "BUY"; reason = `BB Lower ${fmt(bb.lower,2)}`; }
+            if (pp <= bb.upper && p > bb.upper) { action = "SELL"; reason = `BB Upper ${fmt(bb.upper,2)}`; }
+          }
+        } else if (st.type === "stoch_rsi") {
+          const sr = calcStochRSI(h);
+          if (sr) {
+            if (sr.prevK <= 20 && sr.k > 20) { action = "BUY"; reason = `StochRSI cross ▲ 20 (${fmt(sr.k,1)})`; }
+            if (sr.prevK >= 80 && sr.k < 80) { action = "SELL"; reason = `StochRSI cross ▼ 80 (${fmt(sr.k,1)})`; }
+          }
         }
         if (!action) return;
 
@@ -1113,42 +1203,90 @@ export default function TradingApp() {
 
         const amt = st.amountPerTrade;
         const time = ts();
-        if (action === "BUY" && uc.balance >= amt) {
-          const got = (amt / price) * (1 - SPOT_FEE);
-          const fee = (amt / price) * SPOT_FEE;
-          uc.balance -= amt;
-          uc.spot[sym] = (uc.spot[sym] || 0) + got;
-          const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "BUY [AUTO]", price, amount: amt, fee: fee * price, qty: got };
-          uc.trades = [trade, ...uc.trades];
-          const logEntry = { time, sym, action: "BUY", price, amount: amt, reason };
-          uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
-          api.recordTrade(uc.id, trade);
-          api.recordStrategyLog(uc.id, logEntry);
-        } else if (action === "BUY") {
-          /* BUY signal but insufficient balance — log signal to reset anti-repeat */
-          const logEntry = { time, sym, action: "BUY", price, amount: 0, reason: reason + " (недостатньо коштів)" };
-          uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
-          api.recordStrategyLog(uc.id, logEntry);
-        } else if (action === "SELL") {
-          const held = uc.spot[sym] || 0;
-          const sellQty = Math.min(amt / price, held);
-          if (sellQty > 0) {
-            const got = sellQty * price * (1 - SPOT_FEE);
-            const fee = sellQty * price * SPOT_FEE;
-            uc.spot[sym] = held - sellQty;
-            if (uc.spot[sym] < 1e-10) delete uc.spot[sym];
-            uc.balance += got;
-            const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "SELL [AUTO]", price, amount: sellQty * price, fee, qty: sellQty };
+        const isFuturesMode = (st.instrument || "SPOT") === "FUTURES";
+
+        if (isFuturesMode) {
+          /* ═══ FUTURES AUTO-TRADING ═══ */
+          uc.futures = [...uc.futures];
+          const fSide: "LONG" | "SHORT" = action === "BUY" ? "LONG" : "SHORT";
+          const existingPos = uc.futures.find((f) => f.sym === sym && !f.liquidated && !f.closedBySl && !f.closedByTp);
+
+          /* close opposite position first (flip) */
+          if (existingPos && existingPos.side !== fSide) {
+            const cp = price;
+            const pnl = existingPos.side === "LONG"
+              ? ((cp - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage
+              : ((existingPos.entry - cp) / existingPos.entry) * existingPos.margin * existingPos.leverage;
+            const closeFee = existingPos.notional * FUT_FEE;
+            uc.balance += existingPos.margin + pnl - closeFee;
+            const idx = uc.futures.indexOf(existingPos);
+            uc.futures[idx] = { ...existingPos, liquidated: true, liqTime: time };
+            const closeTrade: Trade = { id: uid(), time, sym, inst: "FUTURES", side: `CLOSE ${existingPos.side} [AUTO]`, price: cp, amount: existingPos.notional, fee: closeFee, qty: pnl };
+            uc.trades = [closeTrade, ...uc.trades];
+            api.recordTrade(uc.id, closeTrade);
+          }
+
+          /* open new position if no same-direction exists */
+          const samePos = uc.futures.find((f) => f.sym === sym && f.side === fSide && !f.liquidated && !f.closedBySl && !f.closedByTp);
+          if (!samePos) {
+            const leverage = st.leverage || 5;
+            const notional = amt;
+            const margin = notional / leverage;
+            const openFee = notional * FUT_FEE;
+            if (margin + openFee <= uc.balance) {
+              uc.balance -= margin + openFee;
+              const sl = (st.slPct || 0) > 0 ? (fSide === "LONG" ? price * (1 - st.slPct / 100) : price * (1 + st.slPct / 100)) : undefined;
+              const tp = (st.tpPct || 0) > 0 ? (fSide === "LONG" ? price * (1 + st.tpPct / 100) : price * (1 - st.tpPct / 100)) : undefined;
+              uc.futures.push({ id: uid(), sym, side: fSide, leverage, entry: price, margin, notional, fee: openFee, openTime: time, liquidated: false, ...(sl ? { sl } : {}), ...(tp ? { tp } : {}) });
+              const openTrade: Trade = { id: uid(), time, sym, inst: "FUTURES", side: `OPEN ${fSide} [AUTO]`, price, amount: notional, fee: openFee, qty: notional / price, ...(sl ? { sl } : {}), ...(tp ? { tp } : {}) };
+              uc.trades = [openTrade, ...uc.trades];
+              const logEntry = { time, sym, action, price, amount: notional, reason: `${reason} | ${fSide} x${leverage}` };
+              uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
+              api.recordTrade(uc.id, openTrade);
+              api.recordStrategyLog(uc.id, logEntry);
+            } else {
+              const logEntry = { time, sym, action, price, amount: 0, reason: reason + " (недостатньо маржі)" };
+              uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
+              api.recordStrategyLog(uc.id, logEntry);
+            }
+          }
+        } else {
+          /* ═══ SPOT AUTO-TRADING ═══ */
+          if (action === "BUY" && uc.balance >= amt) {
+            const got = (amt / price) * (1 - SPOT_FEE);
+            const fee = (amt / price) * SPOT_FEE;
+            uc.balance -= amt;
+            uc.spot[sym] = (uc.spot[sym] || 0) + got;
+            const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "BUY [AUTO]", price, amount: amt, fee: fee * price, qty: got };
             uc.trades = [trade, ...uc.trades];
-            const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
+            const logEntry = { time, sym, action: "BUY", price, amount: amt, reason };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordTrade(uc.id, trade);
             api.recordStrategyLog(uc.id, logEntry);
-          } else {
-            /* SELL signal but no holdings — log signal to reset anti-repeat */
-            const logEntry = { time, sym, action: "SELL", price, amount: 0, reason: reason + " (немає позиції)" };
+          } else if (action === "BUY") {
+            const logEntry = { time, sym, action: "BUY", price, amount: 0, reason: reason + " (недостатньо коштів)" };
             uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
             api.recordStrategyLog(uc.id, logEntry);
+          } else if (action === "SELL") {
+            const held = uc.spot[sym] || 0;
+            const sellQty = Math.min(amt / price, held);
+            if (sellQty > 0) {
+              const got = sellQty * price * (1 - SPOT_FEE);
+              const fee = sellQty * price * SPOT_FEE;
+              uc.spot[sym] = held - sellQty;
+              if (uc.spot[sym] < 1e-10) delete uc.spot[sym];
+              uc.balance += got;
+              const trade: Trade = { id: uid(), time, sym, inst: "SPOT", side: "SELL [AUTO]", price, amount: sellQty * price, fee, qty: sellQty };
+              uc.trades = [trade, ...uc.trades];
+              const logEntry = { time, sym, action: "SELL", price, amount: sellQty * price, reason };
+              uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
+              api.recordTrade(uc.id, trade);
+              api.recordStrategyLog(uc.id, logEntry);
+            } else {
+              const logEntry = { time, sym, action: "SELL", price, amount: 0, reason: reason + " (немає позиції)" };
+              uc.strategy.log = [logEntry, ...uc.strategy.log].slice(0, 50);
+              api.recordStrategyLog(uc.id, logEntry);
+            }
           }
         }
       });
@@ -1448,7 +1586,7 @@ export default function TradingApp() {
         <div className="space-y-3">
           <div className={card}>
             <h2 className="text-yellow-400 font-bold text-sm mb-3">⚡ АВТО-СТРАТЕГІЯ — {activeUser.name}</h2>
-            <p className="text-[10px] text-gray-500 mb-4">Бот автоматично торгує SPOT на кожному тіку цін. Сигнали потребують ≥15 тіків (~3.75 год).</p>
+            <p className="text-[10px] text-gray-500 mb-4">Бот автоматично торгує SPOT або FUTURES на кожному тіку цін. Вибери інструмент, стратегію та параметри.</p>
             <div className="mb-3"><label className="text-[10px] text-gray-500 block mb-1">СТРАТЕГІЯ</label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{Object.entries(STRATEGIES).map(([key, s]) => (
                 <button key={key} onClick={() => { updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, type: key } })); api.updateStrategy(activeUserId, { type: key }); }}
@@ -1477,13 +1615,49 @@ export default function TradingApp() {
                     }} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${(activeUser.strategy?.timeframe || "15m") === key ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>{tf.label}</button>
                   ))}</div>
                 </div>
-                <div><label className="text-[10px] text-gray-500 block mb-1">СУМА НА ТРЕЙД (USDT)</label>
+                {/* Instrument toggle */}
+                <div><label className="text-[10px] text-gray-500 block mb-1">ІНСТРУМЕНТ</label>
+                  <div className="flex gap-1">{(["SPOT", "FUTURES"] as const).map((inst) => (
+                    <button key={inst} onClick={() => {
+                      updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, instrument: inst } }));
+                      api.updateStrategy(activeUserId, { instrument: inst });
+                    }} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${(activeUser.strategy?.instrument || "SPOT") === inst ? (inst === "FUTURES" ? "bg-yellow-500 text-black" : "bg-green-600 text-white") : "bg-[#1a1a1a] text-gray-400"}`}>{inst}</button>
+                  ))}</div>
+                </div>
+                <div><label className="text-[10px] text-gray-500 block mb-1">{(activeUser.strategy?.instrument || "SPOT") === "FUTURES" ? "NOTIONAL НА ТРЕЙД (USDT)" : "СУМА НА ТРЕЙД (USDT)"}</label>
                   <input className={inp} type="number" value={activeUser.strategy?.amountPerTrade || 100} onChange={(e) => {
                     const v = Math.max(1, parseFloat(e.target.value) || 100);
                     updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, amountPerTrade: v } }));
                     api.updateStrategy(activeUserId, { amountPerTrade: v });
                   }} />
                 </div>
+                {(activeUser.strategy?.instrument || "SPOT") === "FUTURES" && (
+                  <div className="grid grid-cols-3 gap-2">
+                    <div><label className="text-[10px] text-gray-500 block mb-1">ПЛЕЧЕ</label>
+                      <select value={activeUser.strategy?.leverage || 5} onChange={(e) => {
+                        const v = parseInt(e.target.value);
+                        updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, leverage: v } }));
+                        api.updateStrategy(activeUserId, { leverage: v });
+                      }} className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white">
+                        {LEVERAGES.map((l) => <option key={l} value={l}>x{l}</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-[10px] text-gray-500 block mb-1">STOP LOSS (%)</label>
+                      <input className={inp} type="number" value={activeUser.strategy?.slPct || 3} onChange={(e) => {
+                        const v = Math.max(0, parseFloat(e.target.value) || 0);
+                        updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, slPct: v } }));
+                        api.updateStrategy(activeUserId, { slPct: v });
+                      }} />
+                    </div>
+                    <div><label className="text-[10px] text-gray-500 block mb-1">TAKE PROFIT (%)</label>
+                      <input className={inp} type="number" value={activeUser.strategy?.tpPct || 15} onChange={(e) => {
+                        const v = Math.max(0, parseFloat(e.target.value) || 0);
+                        updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, tpPct: v } }));
+                        api.updateStrategy(activeUserId, { tpPct: v });
+                      }} />
+                    </div>
+                  </div>
+                )}
                 <button onClick={() => {
                   const newActive = !activeUser.strategy.active;
                   updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, active: newActive } }));
@@ -1492,7 +1666,7 @@ export default function TradingApp() {
                   {activeUser.strategy?.active ? "⏹ ЗУПИНИТИ БОТА" : "▶ ЗАПУСТИТИ БОТА"}
                 </button>
                 {activeUser.strategy?.active && (
-                  <div className="text-center"><span className="inline-block px-3 py-1 bg-green-900/40 border border-green-700 rounded text-green-400 text-xs font-bold animate-pulse">⚡ БОТ АКТИВНИЙ — {STRATEGIES[activeUser.strategy.type]?.name}</span></div>
+                  <div className="text-center"><span className="inline-block px-3 py-1 bg-green-900/40 border border-green-700 rounded text-green-400 text-xs font-bold animate-pulse">⚡ БОТ АКТИВНИЙ — {STRATEGIES[activeUser.strategy.type]?.name} ({(activeUser.strategy.instrument || "SPOT") === "FUTURES" ? `FUTURES x${activeUser.strategy.leverage || 5}` : "SPOT"})</span></div>
                 )}
               </div>
             )}
