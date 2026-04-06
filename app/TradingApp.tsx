@@ -479,7 +479,7 @@ export default function TradingApp() {
       if (sig === "bullish") return { action: "BUY", reason: "SMC Inducement ▲ (imbalance)" };
       if (sig === "bearish") return { action: "SELL", reason: "SMC Inducement ▼ (imbalance)" };
     } else if (strat === "scalp_sma_ema") {
-      return detectSMA5xEMA9(h);
+      return detectSMA5xEMA9(slice);
     }
     return null;
   };
@@ -1245,17 +1245,51 @@ export default function TradingApp() {
   };
 
   /* ── Scalp Strategy 3: SMA(5) × EMA(9) Crossover ── */
-  const detectSMA5xEMA9 = (h: number[]): { action: string; reason: string } | null => {
-    if (h.length < 10) return null;
+  const detectSMA5xEMA9 = (candles: Candle[]): { action: string; reason: string } | null => {
+    if (candles.length < 30) return null;
+    const h = candles.map((c) => c.c);
+
+    /* ── Step 1: detect SMA(5) × EMA(9) crossover ── */
     const sma5now = calcSMA(h, 5);
     const ema9now = calcEMA(h, 9);
     const sma5prev = calcSMA(h.slice(0, -1), 5);
     const ema9prev = calcEMA(h.slice(0, -1), 9);
     if (sma5now === null || ema9now === null || sma5prev === null || ema9prev === null) return null;
-    /* SMA(5) crosses EMA(9) from below = bullish */
-    if (sma5prev <= ema9prev && sma5now > ema9now) return { action: "BUY", reason: `SMA5 cross ▲ EMA9 (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
-    /* SMA(5) crosses EMA(9) from above = bearish */
-    if (sma5prev >= ema9prev && sma5now < ema9now) return { action: "SELL", reason: `SMA5 cross ▼ EMA9 (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
+
+    const bullishCross = sma5prev <= ema9prev && sma5now > ema9now;
+    const bearishCross = sma5prev >= ema9prev && sma5now < ema9now;
+    if (!bullishCross && !bearishCross) return null;
+
+    /* ── Step 2: 4H key support/resistance level filter ── */
+    /* Use broader lookback (80 candles) to find key levels via percentile */
+    const lookback = candles.slice(Math.max(0, candles.length - 80));
+    const sortH = lookback.map((c) => c.h).sort((a, b) => b - a);
+    const sortL = lookback.map((c) => c.l).sort((a, b) => a - b);
+    const resistanceZone = sortH[Math.floor(sortH.length * 0.15)];
+    const supportZone = sortL[Math.floor(sortL.length * 0.15)];
+    const range = resistanceZone - supportZone || 1;
+    const last = candles[candles.length - 1];
+
+    /* price must be within 20% of S/R zone range */
+    const proxPct = 0.20;
+    const nearSupport = last.c <= supportZone + range * proxPct;
+    const nearResistance = last.c >= resistanceZone - range * proxPct;
+
+    /* BUY only near support, SELL only near resistance */
+    if (bullishCross && !nearSupport) return null;
+    if (bearishCross && !nearResistance) return null;
+
+    /* ── Step 3: momentum confirmation — last candle should agree with direction ── */
+    const body = last.c - last.o;
+    if (bullishCross && body < 0) return null;   /* red candle on bull cross = weak */
+    if (bearishCross && body > 0) return null;   /* green candle on bear cross = weak */
+
+    /* ── Step 4: separation filter — MAs must have meaningful gap (>0.05% of price) ── */
+    const gapPct = Math.abs(sma5now - ema9now) / last.c;
+    if (gapPct < 0.0005) return null;  /* too close, likely to whipsaw */
+
+    if (bullishCross) return { action: "BUY", reason: `SMA5 cross ▲ EMA9 @ support (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
+    if (bearishCross) return { action: "SELL", reason: `SMA5 cross ▼ EMA9 @ resistance (${fmt(sma5now,2)}/${fmt(ema9now,2)})` };
     return null;
   };
 
@@ -1414,7 +1448,7 @@ export default function TradingApp() {
           if (indSig === "bullish") { action = "BUY"; reason = "SMC Inducement ▲ (imbalance)"; }
           if (indSig === "bearish") { action = "SELL"; reason = "SMC Inducement ▼ (imbalance)"; }
         } else if (st.type === "scalp_sma_ema") {
-          const seSig = detectSMA5xEMA9(h);
+          const seSig = detectSMA5xEMA9(tfCandlesForSym);
           if (seSig) { action = seSig.action; reason = seSig.reason; }
         }
         if (!action) return;
