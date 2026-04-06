@@ -1168,43 +1168,77 @@ export default function TradingApp() {
   const detectSMCInducement = (candles: Candle[]): "bullish" | "bearish" | null => {
     if (candles.length < 20) return null;
 
-    /* identify liquidity zones from broader data */
-    const lookback = candles.slice(-100);
-    const sortedHighs = lookback.map((c) => c.h).sort((a, b) => b - a);
-    const sortedLows = lookback.map((c) => c.l).sort((a, b) => a - b);
-    const resistanceLevel = sortedHighs[Math.floor(sortedHighs.length * 0.05)];
-    const supportLevel = sortedLows[Math.floor(sortedLows.length * 0.05)];
+    /* identify multiple liquidity zones (using percentiles + recent swing levels) */
+    const lookback = candles.slice(-80);
+    const sortH = lookback.map((c) => c.h).sort((a, b) => b - a);
+    const sortL = lookback.map((c) => c.l).sort((a, b) => a - b);
+    /* multiple resistance/support levels for broader coverage */
+    const resistanceLevels = [
+      sortH[Math.floor(sortH.length * 0.05)],
+      sortH[Math.floor(sortH.length * 0.10)],
+      sortH[Math.floor(sortH.length * 0.15)],
+    ];
+    const supportLevels = [
+      sortL[Math.floor(sortL.length * 0.05)],
+      sortL[Math.floor(sortL.length * 0.10)],
+      sortL[Math.floor(sortL.length * 0.15)],
+    ];
 
-    const recent = candles.slice(-5);
-    const last = recent[recent.length - 1]; /* current candle */
-    const prev = recent[recent.length - 2]; /* previous candle */
-    const prev2 = recent[recent.length - 3]; /* candle before that */
-
-    /* Bullish inducement: false break below support + bullish imbalance engulfing */
-    /* Inducement = prev2 or prev wick below support but close above */
-    const falseBreakDown = (prev2.l < supportLevel && prev2.c > supportLevel) ||
-                           (prev.l < supportLevel && prev.c > supportLevel);
-    if (falseBreakDown) {
-      /* Bullish imbalance: last candle is bullish and its body fully engulfs prev candle's range */
-      const lastBullish = last.c > last.o;
-      const lastBody = last.c - last.o;
-      const prevRange = Math.max(prev.h, prev.o, prev.c) - Math.min(prev.l, prev.o, prev.c);
-      if (lastBullish && lastBody > 0 && lastBody > prevRange &&
-          last.c > Math.max(prev.o, prev.c) && last.o < Math.min(prev.o, prev.c)) {
-        return "bullish";
+    /* also add recent swing highs/lows as liquidity zones */
+    for (let i = 2; i < lookback.length - 2; i++) {
+      if (lookback[i].h > lookback[i - 1].h && lookback[i].h > lookback[i - 2].h &&
+          lookback[i].h > lookback[i + 1].h && lookback[i].h > lookback[i + 2].h) {
+        resistanceLevels.push(lookback[i].h);
+      }
+      if (lookback[i].l < lookback[i - 1].l && lookback[i].l < lookback[i - 2].l &&
+          lookback[i].l < lookback[i + 1].l && lookback[i].l < lookback[i + 2].l) {
+        supportLevels.push(lookback[i].l);
       }
     }
 
-    /* Bearish inducement: false break above resistance + bearish imbalance engulfing */
-    const falseBreakUp = (prev2.h > resistanceLevel && prev2.c < resistanceLevel) ||
-                         (prev.h > resistanceLevel && prev.c < resistanceLevel);
-    if (falseBreakUp) {
-      const lastBearish = last.c < last.o;
-      const lastBody = last.o - last.c;
-      const prevRange = Math.max(prev.h, prev.o, prev.c) - Math.min(prev.l, prev.o, prev.c);
-      if (lastBearish && lastBody > 0 && lastBody > prevRange &&
-          last.o > Math.max(prev.o, prev.c) && last.c < Math.min(prev.o, prev.c)) {
-        return "bearish";
+    /* average body size for relative comparison */
+    const bodies = lookback.slice(-20).map((c) => Math.abs(c.c - c.o));
+    const avgBody = bodies.reduce((a, b) => a + b, 0) / bodies.length || 1;
+
+    /* check last 4 candles for inducement pattern */
+    const recent = candles.slice(-6);
+
+    for (let k = recent.length - 1; k >= recent.length - 1; k--) {
+      const cur = recent[k];
+      const p1 = recent[k - 1]; /* prev candle */
+      const p2 = recent[k - 2]; /* candle before */
+      const p3 = recent[k - 3]; /* 3 candles back */
+
+      /* ── BULLISH: false break below support + bullish imbalance ── */
+      for (const sup of supportLevels) {
+        /* inducement: any of last 3 candles wicked below support but closed above */
+        const falseBreak = [p3, p2, p1].some((c) => c.l < sup && c.c > sup * 0.998);
+        if (!falseBreak) continue;
+
+        /* bullish imbalance candle: body engulfs prev candle's body (relaxed from full range) */
+        const curBullish = cur.c > cur.o;
+        const curBody = cur.c - cur.o;
+        const p1Body = Math.abs(p1.c - p1.o) || avgBody * 0.1;
+
+        if (curBullish && curBody > p1Body * 0.8 && curBody > avgBody * 0.8 &&
+            cur.c > Math.max(p1.o, p1.c)) {
+          return "bullish";
+        }
+      }
+
+      /* ── BEARISH: false break above resistance + bearish imbalance ── */
+      for (const res of resistanceLevels) {
+        const falseBreak = [p3, p2, p1].some((c) => c.h > res && c.c < res * 1.002);
+        if (!falseBreak) continue;
+
+        const curBearish = cur.c < cur.o;
+        const curBody = cur.o - cur.c;
+        const p1Body = Math.abs(p1.c - p1.o) || avgBody * 0.1;
+
+        if (curBearish && curBody > p1Body * 0.8 && curBody > avgBody * 0.8 &&
+            cur.c < Math.min(p1.o, p1.c)) {
+          return "bearish";
+        }
       }
     }
     return null;
