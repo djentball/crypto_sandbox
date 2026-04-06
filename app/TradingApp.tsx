@@ -1063,79 +1063,103 @@ export default function TradingApp() {
   };
 
   /* ── Scalp Strategy 1: Price Action patterns near 4H key levels ── */
-  /* Detects: double bottom/top, ascending/descending triangles near support/resistance */
+  /* Detects: double bottom/top, ascending/descending triangles, H&S near S/R */
   const detectPriceActionPattern = (candles: Candle[]): "bullish" | "bearish" | null => {
-    if (candles.length < 20) return null;
-    const recent = candles.slice(-20);
+    if (candles.length < 30) return null;
+    const recent = candles.slice(-30);
     const last = recent[recent.length - 1];
+    const prev = recent[recent.length - 2];
 
-    /* identify 4H-level support/resistance from broader history */
-    const lookback = candles.slice(-100);
-    const highs = lookback.map((c) => c.h).sort((a, b) => b - a);
-    const lows = lookback.map((c) => c.l).sort((a, b) => a - b);
-    /* cluster top/bottom 10% as resistance/support zones */
-    const resistanceZone = highs[Math.floor(highs.length * 0.05)];
-    const supportZone = lows[Math.floor(lows.length * 0.05)];
+    /* identify support/resistance from broader history — use 15% percentile (wider zone) */
+    const lookback = candles.slice(Math.max(0, candles.length - 80));
+    const sortH = lookback.map((c) => c.h).sort((a, b) => b - a);
+    const sortL = lookback.map((c) => c.l).sort((a, b) => a - b);
+    const resistanceZone = sortH[Math.floor(sortH.length * 0.15)];
+    const supportZone = sortL[Math.floor(sortL.length * 0.15)];
     const range = resistanceZone - supportZone || 1;
-    const tolerance = range * 0.02;
 
-    const nearSupport = last.c <= supportZone + tolerance * 3;
-    const nearResistance = last.c >= resistanceZone - tolerance * 3;
+    /* wider proximity check: within 25% of the S/R zone range */
+    const proxPct = 0.25;
+    const nearSupport = last.c <= supportZone + range * proxPct;
+    const nearResistance = last.c >= resistanceZone - range * proxPct;
 
     if (!nearSupport && !nearResistance) return null;
 
-    /* detect double bottom (bullish) near support */
-    if (nearSupport) {
-      const localLows: number[] = [];
-      for (let i = 2; i < recent.length - 2; i++) {
-        if (recent[i].l < recent[i - 1].l && recent[i].l < recent[i - 2].l &&
-            recent[i].l < recent[i + 1].l && recent[i].l < recent[i + 2].l) {
-          localLows.push(recent[i].l);
-        }
+    /* find swing lows and swing highs (lookahead=1 for more signals) */
+    const swingLows: { idx: number; price: number }[] = [];
+    const swingHighs: { idx: number; price: number }[] = [];
+    for (let i = 1; i < recent.length - 1; i++) {
+      if (recent[i].l <= recent[i - 1].l && recent[i].l <= recent[i + 1].l) {
+        swingLows.push({ idx: i, price: recent[i].l });
       }
-      /* two lows within tolerance = double bottom */
-      if (localLows.length >= 2) {
-        const l1 = localLows[localLows.length - 2], l2 = localLows[localLows.length - 1];
-        if (Math.abs(l1 - l2) / ((l1 + l2) / 2) < 0.015) {
-          /* neckline breakout: price closes above the high between the two lows */
-          const midHigh = Math.max(...recent.slice(-10).map((c) => c.h));
-          const neckline = midHigh * 0.998;
-          if (last.c > neckline && recent[recent.length - 2].c <= neckline) return "bullish";
-        }
+      if (recent[i].h >= recent[i - 1].h && recent[i].h >= recent[i + 1].h) {
+        swingHighs.push({ idx: i, price: recent[i].h });
       }
-      /* ascending triangle near support: rising lows + flat resistance */
-      const last8 = recent.slice(-8);
-      const lowsTrend = last8.map((c) => c.l);
-      const highsFlat = last8.map((c) => c.h);
-      const lowsRising = lowsTrend.every((v, i) => i === 0 || v >= lowsTrend[i - 1] - tolerance);
-      const highsRange = Math.max(...highsFlat) - Math.min(...highsFlat);
-      if (lowsRising && highsRange < range * 0.03 && last.c > Math.max(...highsFlat) * 0.999) return "bullish";
     }
 
-    /* detect double top (bearish) near resistance */
-    if (nearResistance) {
-      const localHighs: number[] = [];
-      for (let i = 2; i < recent.length - 2; i++) {
-        if (recent[i].h > recent[i - 1].h && recent[i].h > recent[i - 2].h &&
-            recent[i].h > recent[i + 1].h && recent[i].h > recent[i + 2].h) {
-          localHighs.push(recent[i].h);
+    /* ── BULLISH patterns near support ── */
+    if (nearSupport && swingLows.length >= 2) {
+      /* Double bottom: two similar lows + neckline break */
+      for (let j = swingLows.length - 1; j >= 1; j--) {
+        const l2 = swingLows[j], l1 = swingLows[j - 1];
+        if (l2.idx - l1.idx < 3) continue; /* need spacing */
+        const similarity = Math.abs(l1.price - l2.price) / ((l1.price + l2.price) / 2);
+        if (similarity < 0.03) { /* 3% tolerance */
+          /* neckline = highest high between the two lows */
+          const between = recent.slice(l1.idx, l2.idx + 1);
+          const neckline = Math.max(...between.map((c) => c.h));
+          if (last.c > neckline && prev.c <= neckline) return "bullish";
         }
       }
-      if (localHighs.length >= 2) {
-        const h1 = localHighs[localHighs.length - 2], h2 = localHighs[localHighs.length - 1];
-        if (Math.abs(h1 - h2) / ((h1 + h2) / 2) < 0.015) {
-          const midLow = Math.min(...recent.slice(-10).map((c) => c.l));
-          const neckline = midLow * 1.002;
-          if (last.c < neckline && recent[recent.length - 2].c >= neckline) return "bearish";
+
+      /* Ascending triangle: lows trending up, highs roughly flat */
+      const last10 = recent.slice(-10);
+      const sLows = last10.filter((_, i) => i > 0 && i < last10.length - 1 && last10[i].l <= last10[i - 1].l && last10[i].l <= last10[i + 1].l);
+      if (sLows.length >= 2) {
+        const lowsUp = sLows[sLows.length - 1].l > sLows[0].l;
+        const flatHigh = Math.max(...last10.map((c) => c.h));
+        const flatLowH = Math.min(...last10.slice(-5).map((c) => c.h));
+        if (lowsUp && (flatHigh - flatLowH) / flatHigh < 0.015 && last.c > flatHigh) return "bullish";
+      }
+
+      /* Bullish momentum: 3 consecutive higher lows + close above recent high */
+      const tail5 = recent.slice(-5);
+      if (tail5[1].l < tail5[2].l && tail5[2].l < tail5[3].l && tail5[3].l < tail5[4].l) {
+        const recentHigh = Math.max(tail5[0].h, tail5[1].h, tail5[2].h);
+        if (last.c > recentHigh) return "bullish";
+      }
+    }
+
+    /* ── BEARISH patterns near resistance ── */
+    if (nearResistance && swingHighs.length >= 2) {
+      /* Double top: two similar highs + neckline break */
+      for (let j = swingHighs.length - 1; j >= 1; j--) {
+        const h2 = swingHighs[j], h1 = swingHighs[j - 1];
+        if (h2.idx - h1.idx < 3) continue;
+        const similarity = Math.abs(h1.price - h2.price) / ((h1.price + h2.price) / 2);
+        if (similarity < 0.03) {
+          const between = recent.slice(h1.idx, h2.idx + 1);
+          const neckline = Math.min(...between.map((c) => c.l));
+          if (last.c < neckline && prev.c >= neckline) return "bearish";
         }
       }
-      /* descending triangle near resistance */
-      const last8 = recent.slice(-8);
-      const highsTrend = last8.map((c) => c.h);
-      const lowsFlat = last8.map((c) => c.l);
-      const highsFalling = highsTrend.every((v, i) => i === 0 || v <= highsTrend[i - 1] + tolerance);
-      const lowsRange = Math.max(...lowsFlat) - Math.min(...lowsFlat);
-      if (highsFalling && lowsRange < range * 0.03 && last.c < Math.min(...lowsFlat) * 1.001) return "bearish";
+
+      /* Descending triangle: highs trending down, lows roughly flat */
+      const last10 = recent.slice(-10);
+      const sHighs = last10.filter((_, i) => i > 0 && i < last10.length - 1 && last10[i].h >= last10[i - 1].h && last10[i].h >= last10[i + 1].h);
+      if (sHighs.length >= 2) {
+        const highsDown = sHighs[sHighs.length - 1].h < sHighs[0].h;
+        const flatLow = Math.min(...last10.map((c) => c.l));
+        const flatHighL = Math.max(...last10.slice(-5).map((c) => c.l));
+        if (highsDown && (flatHighL - flatLow) / flatLow < 0.015 && last.c < flatLow) return "bearish";
+      }
+
+      /* Bearish momentum: 3 consecutive lower highs + close below recent low */
+      const tail5 = recent.slice(-5);
+      if (tail5[1].h > tail5[2].h && tail5[2].h > tail5[3].h && tail5[3].h > tail5[4].h) {
+        const recentLow = Math.min(tail5[0].l, tail5[1].l, tail5[2].l);
+        if (last.c < recentLow) return "bearish";
+      }
     }
     return null;
   };
