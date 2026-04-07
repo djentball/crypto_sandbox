@@ -388,7 +388,9 @@ export default function TradingApp() {
   /* ═══ LEADERBOARD ═══ */
   interface LeaderEntry {
     id: string; created_at?: string; strategy: string; symbols: string[];
-    config: string; pnlPct: number; pnl: number; trades: number;
+    instrument: string; leverage: number; timeframe: string; period: string;
+    slPct: number; tpPct: number;
+    pnlPct: number; pnl: number; trades: number;
     winRate: number; maxDD: number; liquidations: number;
   }
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
@@ -401,7 +403,10 @@ export default function TradingApp() {
       setLeaderboard(rows.map((r: any) => ({
         id: r.id, created_at: r.created_at, strategy: r.strategy,
         symbols: typeof r.symbols === "string" ? JSON.parse(r.symbols) : r.symbols,
-        config: r.config, pnlPct: r.pnl_pct, pnl: r.pnl, trades: r.trades,
+        instrument: r.instrument || "FUTURES", leverage: r.leverage || 5,
+        timeframe: r.timeframe || "1h", period: r.period || "3m",
+        slPct: r.sl_pct || 0, tpPct: r.tp_pct || 0,
+        pnlPct: r.pnl_pct, pnl: r.pnl, trades: r.trades,
         winRate: r.win_rate, maxDD: r.max_dd, liquidations: r.liquidations,
       })));
     } catch {}
@@ -764,12 +769,16 @@ export default function TradingApp() {
     /* auto-add to leaderboard */
     const pnlVal = balance - startBal;
     const pnlPctVal = (pnlVal / startBal) * 100;
-    const configStr = `${btInstrument === "FUTURES" ? `x${btLeverage}` : "SPOT"} · ${TIMEFRAMES[btTimeframe]?.label} · ${BT_PERIODS[btPeriod]?.label}${btSl ? ` SL${btSl}%` : ""}${btTp ? ` TP${btTp}%` : ""}`;
     addToLeaderboard({
       id: uid(),
       strategy: STRATEGIES[btStrategy]?.name || btStrategy,
       symbols: btSymbols.map((s) => NICE[s] || s),
-      config: configStr,
+      instrument: btInstrument,
+      leverage: btLeverage,
+      timeframe: btTimeframe,
+      period: btPeriod,
+      slPct: btSl ? parseFloat(btSl) : 0,
+      tpPct: btTp ? parseFloat(btTp) : 0,
       pnlPct: pnlPctVal,
       pnl: pnlVal,
       trades: trades.length,
@@ -2209,56 +2218,77 @@ export default function TradingApp() {
 
           {/* ═══ LEADERBOARD TABLE ═══ */}
           {leaderboard.length > 0 && (() => {
-            const sortKeys = ["pnlPct", "pnl", "trades", "winRate", "maxDD"] as const;
+            const sortKeys = ["pnlPct", "pnl", "trades", "winRate", "maxDD", "leverage", "slPct", "tpPct"] as const;
             type SortKey = typeof sortKeys[number];
-            const sortLabels: Record<SortKey, string> = { pnlPct: "P&L %", pnl: "P&L $", trades: "УГОД", winRate: "WIN %", maxDD: "MAX DD" };
             const [sortKey, sortDir] = (lbSort || "pnlPct:desc").split(":") as [SortKey, string];
+            const TF_ORDER: Record<string, number> = { "15m": 1, "1h": 2, "4h": 3 };
+            const PER_ORDER: Record<string, number> = { "1m": 1, "3m": 3, "6m": 6, "1y": 12 };
             const sorted = [...leaderboard].sort((a, b) => {
-              const va = a[sortKey], vb = b[sortKey];
+              let va: number, vb: number;
+              if (sortKey === "slPct" || sortKey === "tpPct" || sortKey === "leverage") {
+                va = a[sortKey]; vb = b[sortKey];
+              } else {
+                va = a[sortKey as keyof LeaderEntry] as number;
+                vb = b[sortKey as keyof LeaderEntry] as number;
+              }
               return sortDir === "asc" ? va - vb : vb - va;
             });
-            const toggleSort = (key: SortKey) => {
-              if (sortKey === key) setLbSort(`${key}:${sortDir === "desc" ? "asc" : "desc"}`);
+            /* also support sorting by timeframe and period via special keys */
+            const sortedFinal = lbSort.startsWith("timeframe") ? [...leaderboard].sort((a, b) => {
+              const va = TF_ORDER[a.timeframe] || 0, vb = TF_ORDER[b.timeframe] || 0;
+              return sortDir === "asc" ? va - vb : vb - va;
+            }) : lbSort.startsWith("period") ? [...leaderboard].sort((a, b) => {
+              const va = PER_ORDER[a.period] || 0, vb = PER_ORDER[b.period] || 0;
+              return sortDir === "asc" ? va - vb : vb - va;
+            }) : sorted;
+            const toggleSort = (key: string) => {
+              const curKey = lbSort.split(":")[0];
+              const curDir = lbSort.split(":")[1];
+              if (curKey === key) setLbSort(`${key}:${curDir === "desc" ? "asc" : "desc"}`);
               else setLbSort(`${key}:desc`);
             };
-            const arrow = (key: SortKey) => sortKey === key ? (sortDir === "desc" ? " ▼" : " ▲") : "";
-            const thCls = "text-right py-1 cursor-pointer hover:text-yellow-400 transition-colors select-none";
+            const arrow = (key: string) => lbSort.split(":")[0] === key ? (sortDir === "desc" ? " ▼" : " ▲") : "";
+            const thSort = "py-2.5 cursor-pointer hover:text-yellow-400 transition-colors select-none";
 
             return (
             <div className={card}>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-yellow-400 font-bold text-sm">🏆 ТОП СТРАТЕГІЙ ({leaderboard.length})</h3>
-                <button onClick={clearLeaderboard} className="text-[10px] text-gray-600 hover:text-red-400 transition-colors">Очистити</button>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-yellow-400 font-bold text-base">🏆 ТОП СТРАТЕГІЙ ({leaderboard.length})</h3>
+                <button onClick={clearLeaderboard} className="text-xs text-gray-600 hover:text-red-400 transition-colors">Очистити</button>
               </div>
-              <div className="overflow-x-auto max-h-96 overflow-y-auto">
-                <table className="w-full text-xs">
+              <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                <table className="w-full text-sm">
                   <thead>
-                    <tr className="text-gray-500 sticky top-0 bg-[#111]">
-                      <th className="text-left py-1 w-6">#</th>
-                      <th className="text-left py-1">СТРАТЕГІЯ</th>
-                      <th className="text-left py-1">МОНЕТИ</th>
-                      <th className="text-left py-1">КОНФІГ</th>
-                      <th className={thCls} onClick={() => toggleSort("pnlPct")}>{sortLabels.pnlPct}{arrow("pnlPct")}</th>
-                      <th className={thCls} onClick={() => toggleSort("pnl")}>{sortLabels.pnl}{arrow("pnl")}</th>
-                      <th className={thCls} onClick={() => toggleSort("trades")}>{sortLabels.trades}{arrow("trades")}</th>
-                      <th className={thCls} onClick={() => toggleSort("winRate")}>{sortLabels.winRate}{arrow("winRate")}</th>
-                      <th className={thCls} onClick={() => toggleSort("maxDD")}>{sortLabels.maxDD}{arrow("maxDD")}</th>
-                      <th className="text-right py-1 text-[10px]">ЧАС</th>
+                    <tr className="text-gray-500 sticky top-0 bg-[#111] text-xs">
+                      <th className="text-left py-2.5 w-8">#</th>
+                      <th className="text-left py-2.5">СТРАТЕГІЯ</th>
+                      <th className="text-left py-2.5">МОНЕТИ</th>
+                      <th className={`text-center ${thSort}`} onClick={() => toggleSort("timeframe")}>ТФ{arrow("timeframe")}</th>
+                      <th className={`text-center ${thSort}`} onClick={() => toggleSort("period")}>ПЕРІОД{arrow("period")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("leverage")}>ПЛЕЧЕ{arrow("leverage")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("slPct")}>SL{arrow("slPct")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("tpPct")}>TP{arrow("tpPct")}</th>
+                      <th className={`text-right ${thSort} font-bold text-yellow-500`} onClick={() => toggleSort("pnlPct")}>P&L %{arrow("pnlPct")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("trades")}>УГОД{arrow("trades")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("winRate")}>WIN %{arrow("winRate")}</th>
+                      <th className={`text-right ${thSort}`} onClick={() => toggleSort("maxDD")}>DD{arrow("maxDD")}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sorted.map((e, i) => (
-                      <tr key={e.id} className={`border-t border-[#222] ${i < 3 ? "bg-yellow-950/10" : ""}`}>
-                        <td className="py-1 text-gray-500 font-bold">{i + 1}</td>
-                        <td className="py-1 text-white font-semibold whitespace-nowrap text-[11px]">{e.strategy}</td>
-                        <td className="py-1 text-yellow-400 text-[10px]">{e.symbols.join(", ")}</td>
-                        <td className="py-1 text-gray-400 text-[10px] whitespace-nowrap">{e.config}</td>
-                        <td className={`py-1 text-right font-bold ${e.pnlPct >= 0 ? "text-green-400" : "text-red-400"}`}>{e.pnlPct >= 0 ? "+" : ""}{fmt(e.pnlPct, 1)}%</td>
-                        <td className={`py-1 text-right ${e.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{e.pnl >= 0 ? "+" : ""}${fmt(e.pnl)}</td>
-                        <td className="py-1 text-right text-white">{e.trades}</td>
-                        <td className={`py-1 text-right ${e.winRate >= 40 ? "text-green-400" : e.winRate >= 30 ? "text-yellow-400" : "text-red-400"}`}>{fmt(e.winRate, 1)}%</td>
-                        <td className="py-1 text-right text-red-400">-{fmt(e.maxDD, 1)}%</td>
-                        <td className="py-1 text-right text-gray-600 text-[9px] whitespace-nowrap">{e.created_at ? new Date(e.created_at).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                    {sortedFinal.map((e, i) => (
+                      <tr key={e.id} className={`border-t border-[#222] ${i < 3 ? "bg-yellow-950/10" : ""} hover:bg-[#1a1a1a]`}>
+                        <td className="py-2.5 text-gray-500 font-bold">{i + 1}</td>
+                        <td className="py-2.5 text-white font-semibold whitespace-nowrap">{e.strategy}</td>
+                        <td className="py-2.5 text-yellow-400">{e.symbols.join(", ")}</td>
+                        <td className="py-2.5 text-center text-gray-300">{TIMEFRAMES[e.timeframe]?.label || e.timeframe}</td>
+                        <td className="py-2.5 text-center text-gray-300">{BT_PERIODS[e.period]?.label || e.period}</td>
+                        <td className="py-2.5 text-right text-purple-400 font-semibold">x{e.leverage}</td>
+                        <td className="py-2.5 text-right text-gray-300">{e.slPct > 0 ? `${e.slPct}%` : "—"}</td>
+                        <td className="py-2.5 text-right text-gray-300">{e.tpPct > 0 ? `${e.tpPct}%` : "—"}</td>
+                        <td className={`py-2.5 text-right font-bold text-base ${e.pnlPct >= 0 ? "text-green-400" : "text-red-400"}`}>{e.pnlPct >= 0 ? "+" : ""}{fmt(e.pnlPct, 1)}%</td>
+                        <td className="py-2.5 text-right text-white">{e.trades}</td>
+                        <td className={`py-2.5 text-right font-semibold ${e.winRate >= 40 ? "text-green-400" : e.winRate >= 30 ? "text-yellow-400" : "text-red-400"}`}>{fmt(e.winRate, 1)}%</td>
+                        <td className="py-2.5 text-right text-red-400">-{fmt(e.maxDD, 1)}%</td>
                       </tr>
                     ))}
                   </tbody>
