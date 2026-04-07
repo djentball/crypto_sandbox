@@ -655,8 +655,11 @@ export default function TradingApp() {
             fSide = "SHORT";
           }
 
-          /* close opposite position first */
-          if (existingPos && fSide && ((existingPos.side === "LONG" && fSide === "SHORT") || (existingPos.side === "SHORT" && fSide === "LONG"))) {
+          /* when SL+TP are both set, don't flip — let the position ride to SL/TP */
+          const hasSlTp = slPct > 0 && tpPct > 0;
+
+          /* close opposite position first (only when no SL/TP lock) */
+          if (existingPos && fSide && !hasSlTp && ((existingPos.side === "LONG" && fSide === "SHORT") || (existingPos.side === "SHORT" && fSide === "LONG"))) {
             const pnl = existingPos.side === "LONG"
               ? ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage
               : ((existingPos.entry - price) / existingPos.entry) * existingPos.margin * existingPos.leverage;
@@ -665,6 +668,9 @@ export default function TradingApp() {
             trades.push({ time, sym, action: `CLOSE ${existingPos.side}`, price, amount: existingPos.notional, fee: closeFee, reason: `Flip → ${fSide}`, balance, pnl });
             openPositions.splice(openPositions.indexOf(existingPos), 1);
           }
+
+          /* skip opening if there's already a position (SL/TP mode: wait for exit) */
+          if (hasSlTp && existingPos) { lastAction[sym] = action; return; }
 
           /* open new position if no same-direction position exists */
           const samePos = openPositions.find((p) => p.sym === sym && p.side === fSide);
@@ -1465,8 +1471,12 @@ export default function TradingApp() {
           uc.futures = [...uc.futures];
           const fSide: "LONG" | "SHORT" = action === "BUY" ? "LONG" : "SHORT";
           const existingPos = uc.futures.find((f) => f.sym === sym && !f.liquidated && !f.closedBySl && !f.closedByTp);
+          const hasSlTp = (st.slPct || 0) > 0 && (st.tpPct || 0) > 0;
 
-          /* close opposite position first (flip) */
+          /* when SL+TP are set, don't flip — let position ride to SL/TP */
+          if (hasSlTp && existingPos) return;
+
+          /* close opposite position first (flip) — only when no SL/TP lock */
           if (existingPos && existingPos.side !== fSide) {
             const cp = price;
             const pnl = existingPos.side === "LONG"
