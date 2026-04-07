@@ -58,6 +58,7 @@ interface Strategy {
   type: string; symbols: string[]; amountPerTrade: number; timeframe: string;
   active: boolean; log: { time: string; sym: string; action: string; price: number; amount: number; reason: string }[];
   instrument: "SPOT" | "FUTURES"; leverage: number; slPct: number; tpPct: number;
+  trendFilter?: boolean; cooldown?: boolean;
 }
 interface User {
   id: string; name: string; startBal: number; balance: number;
@@ -384,6 +385,8 @@ export default function TradingApp() {
   const [btRunning, setBtRunning] = useState(false);
   const [btResult, setBtResult] = useState<BtResult | null>(null);
   const [btProgress, setBtProgress] = useState("");
+  const [btTrendFilter, setBtTrendFilter] = useState(false);
+  const [btCooldown, setBtCooldown] = useState(false);
 
   /* ═══ LEADERBOARD ═══ */
   interface LeaderEntry {
@@ -613,6 +616,11 @@ export default function TradingApp() {
       const leverage = btLeverage;
       const slPct = btSl ? parseFloat(btSl) : 0; /* % from entry */
       const tpPct = btTp ? parseFloat(btTp) : 0;
+      /* trend filter + cooldown state */
+      const consecutiveLosses: Record<string, number> = {};
+      const cooldownUntil: Record<string, number> = {};
+      const COOLDOWN_LOSSES = 3;
+      const COOLDOWN_CANDLES = 5;
 
       for (let i = 0; i < maxLen; i++) {
         /* check SL/TP/liquidation on open positions using candle OHLC */
@@ -669,6 +677,19 @@ export default function TradingApp() {
           }
         }
 
+        /* track cooldown from last closed trade */
+        if (btCooldown && trades.length > 0) {
+          const lt = trades[trades.length - 1];
+          if (lt.action?.startsWith("SL") || lt.action?.startsWith("LIQ")) {
+            const s = lt.sym || "";
+            consecutiveLosses[s] = (consecutiveLosses[s] || 0) + 1;
+            if (consecutiveLosses[s] >= COOLDOWN_LOSSES) { cooldownUntil[s] = i + COOLDOWN_CANDLES; consecutiveLosses[s] = 0; }
+          } else if (lt.action?.startsWith("TP")) {
+            const s = lt.sym || "";
+            consecutiveLosses[s] = 0;
+          }
+        }
+
         /* strategy signals → open/close positions */
         btSymbols.forEach((sym) => {
           const candles = candleMap[sym];
@@ -680,6 +701,19 @@ export default function TradingApp() {
           if (!sig) return;
           const { action, reason } = sig;
           if (lastAction[sym] === action) return;
+
+          /* cooldown check */
+          if (btCooldown && i < (cooldownUntil[sym] || 0)) { lastAction[sym] = action; return; }
+
+          /* trend filter: EMA(50) direction */
+          if (btTrendFilter && slice.length >= 50) {
+            const closes = slice.map((c: { c: number }) => c.c);
+            const ema50 = calcEMA(closes, 50);
+            if (ema50 !== null) {
+              if (action === "BUY" && price < ema50) { lastAction[sym] = action; return; }
+              if (action === "SELL" && price > ema50) { lastAction[sym] = action; return; }
+            }
+          }
 
           const time = candles[i].t;
           const existingPos = openPositions.find((p) => p.sym === sym);
@@ -1524,6 +1558,24 @@ export default function TradingApp() {
         /* anti-repeat: don't repeat the same action twice in a row for same symbol */
         if (lastLog && lastLog.action === action) return;
 
+        /* trend filter: EMA(50) — only trade in trend direction */
+        if (st.trendFilter && h.length >= 50) {
+          const ema50 = calcEMA(h, 50);
+          if (ema50 !== null) {
+            if (action === "BUY" && price < ema50) return;
+            if (action === "SELL" && price > ema50) return;
+          }
+        }
+
+        /* cooldown: pause after 3 consecutive losses */
+        if (st.cooldown) {
+          const recentLogs = st.log.filter(l => l.sym === sym).slice(-3);
+          if (recentLogs.length >= 3) {
+            const allLosses = recentLogs.every(l => l.action === "SL" || l.reason?.includes("SL") || l.reason?.includes("Ліквідація"));
+            if (allLosses) return;
+          }
+        }
+
         const amt = st.amountPerTrade;
         const time = ts();
         const isFuturesMode = (st.instrument || "SPOT") === "FUTURES";
@@ -1985,6 +2037,21 @@ export default function TradingApp() {
                     </div>
                   </div>
                 )}
+                {/* Filters */}
+                <div className="grid grid-cols-2 gap-3 mt-1">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!activeUser.strategy?.trendFilter} onChange={(e) => {
+                      updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, trendFilter: e.target.checked } }));
+                    }} className="accent-yellow-500" />
+                    <span className="text-[10px] text-gray-400">🧭 ТРЕНДОВИЙ ФІЛЬТР</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!activeUser.strategy?.cooldown} onChange={(e) => {
+                      updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, cooldown: e.target.checked } }));
+                    }} className="accent-yellow-500" />
+                    <span className="text-[10px] text-gray-400">❄️ COOLDOWN (3 SL)</span>
+                  </label>
+                </div>
                 <button onClick={() => {
                   const newActive = !activeUser.strategy.active;
                   updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, active: newActive } }));
@@ -2108,6 +2175,18 @@ export default function TradingApp() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Filters */}
+            <div className="flex flex-wrap gap-4 mb-3">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={btTrendFilter} onChange={(e) => setBtTrendFilter(e.target.checked)} className="accent-yellow-500" />
+                <span className="text-xs text-gray-400">🧭 Трендовий фільтр (EMA50)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={btCooldown} onChange={(e) => setBtCooldown(e.target.checked)} className="accent-yellow-500" />
+                <span className="text-xs text-gray-400">❄️ Cooldown (пауза після 3 SL)</span>
+              </label>
             </div>
 
             <button onClick={runBacktest} disabled={btRunning || btSymbols.length === 0} className="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold text-xs px-6 py-2 rounded transition cursor-pointer">

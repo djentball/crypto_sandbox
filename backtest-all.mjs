@@ -400,14 +400,29 @@ async function fetchCandles(symbol, interval, startMs, endMs) {
   return allCandles;
 }
 
+/* ─── Trend filter: EMA(50) direction ─── */
+function getTrendDirection(candles, idx) {
+  if (idx < 50) return null; // not enough data
+  const closes = candles.slice(0, idx + 1).map(c => c.c);
+  const ema50 = calcEMA(closes, 50);
+  if (ema50 === null) return null;
+  const price = closes[closes.length - 1];
+  return price > ema50 ? "BULL" : "BEAR";
+}
+
 /* ─── Backtest engine (futures mode with no-flip when SL+TP set) ─── */
-function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, startBal }) {
+function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, startBal, trendFilter = false, cooldown = false }) {
   let balance = startBal;
   const trades = [];
   const lastAction = {};
   let maxBal = startBal, maxDD = 0, liquidations = 0;
   const openPositions = [];
   const hasSlTp = slPct > 0 && tpPct > 0;
+  let consecutiveLosses = 0;
+  let cooldownUntil = 0; // candle index until which trading is paused
+  const COOLDOWN_LOSSES = 3; // pause after N consecutive losses
+  const COOLDOWN_CANDLES = 5; // pause for N candles
+  let filteredByTrend = 0, filteredByCooldown = 0;
 
   for (let i = 0; i < candles.length; i++) {
     /* check SL/TP/liquidation */
@@ -456,6 +471,20 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
       }
     }
 
+    /* track consecutive losses for cooldown */
+    if (trades.length > 0) {
+      const lastTrade = trades[trades.length - 1];
+      if (lastTrade.type === "SL" || lastTrade.type === "LIQ") {
+        consecutiveLosses++;
+        if (cooldown && consecutiveLosses >= COOLDOWN_LOSSES) {
+          cooldownUntil = i + COOLDOWN_CANDLES;
+          consecutiveLosses = 0;
+        }
+      } else if (lastTrade.type === "TP") {
+        consecutiveLosses = 0;
+      }
+    }
+
     /* strategy signals */
     const sym = "BTCUSDT";
     const slice = candles.slice(0, i + 1);
@@ -465,6 +494,18 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
     if (!sig) continue;
     const { action } = sig;
     if (lastAction[sym] === action) continue;
+
+    /* cooldown check */
+    if (cooldown && i < cooldownUntil) { filteredByCooldown++; lastAction[sym] = action; continue; }
+
+    /* trend filter check */
+    if (trendFilter) {
+      const trend = getTrendDirection(candles, i);
+      if (trend) {
+        if (action === "BUY" && trend === "BEAR") { filteredByTrend++; lastAction[sym] = action; continue; }
+        if (action === "SELL" && trend === "BULL") { filteredByTrend++; lastAction[sym] = action; continue; }
+      }
+    }
 
     const existingPos = openPositions.find((p) => p.sym === sym);
     let fSide = action === "BUY" ? "LONG" : "SHORT";
@@ -532,6 +573,8 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
     maxDD,
     liquidations,
     finalBal: balance,
+    filteredByTrend,
+    filteredByCooldown,
   };
 }
 
@@ -544,12 +587,27 @@ const STRAT_NAMES = {
 };
 
 const CONFIGS = [
-  { tf: "1h", period: 90, lev: 5, sl: 1, tp: 2, amt: 300 },
-  { tf: "1h", period: 90, lev: 5, sl: 1, tp: 3, amt: 300 },
-  { tf: "1h", period: 90, lev: 5, sl: 2, tp: 5, amt: 300 },
-  { tf: "1h", period: 90, lev: 3, sl: 1, tp: 3, amt: 300 },
-  { tf: "4h", period: 90, lev: 5, sl: 2, tp: 6, amt: 300 },
-  { tf: "1h", period: 180, lev: 5, sl: 1, tp: 3, amt: 300 },
+  /* baseline (no filters) */
+  { tf: "1h", period: 90, lev: 5, sl: 2, tp: 5, amt: 300, trend: false, cool: false },
+  { tf: "1h", period: 180, lev: 5, sl: 2, tp: 5, amt: 300, trend: false, cool: false },
+  { tf: "1h", period: 365, lev: 5, sl: 2, tp: 5, amt: 300, trend: false, cool: false },
+  { tf: "4h", period: 90, lev: 5, sl: 2, tp: 6, amt: 300, trend: false, cool: false },
+  { tf: "4h", period: 180, lev: 5, sl: 2, tp: 6, amt: 300, trend: false, cool: false },
+  { tf: "4h", period: 365, lev: 5, sl: 2, tp: 6, amt: 300, trend: false, cool: false },
+  /* with trend filter */
+  { tf: "1h", period: 90, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: false },
+  { tf: "1h", period: 180, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: false },
+  { tf: "1h", period: 365, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: false },
+  { tf: "4h", period: 90, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: false },
+  { tf: "4h", period: 180, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: false },
+  { tf: "4h", period: 365, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: false },
+  /* with trend filter + cooldown */
+  { tf: "1h", period: 90, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: true },
+  { tf: "1h", period: 180, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: true },
+  { tf: "1h", period: 365, lev: 5, sl: 2, tp: 5, amt: 300, trend: true, cool: true },
+  { tf: "4h", period: 90, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: true },
+  { tf: "4h", period: 180, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: true },
+  { tf: "4h", period: 365, lev: 5, sl: 2, tp: 6, amt: 300, trend: true, cool: true },
 ];
 
 async function main() {
@@ -582,11 +640,17 @@ async function main() {
         tpPct: cfg.tp,
         amtPerTrade: cfg.amt,
         startBal: 1000,
+        trendFilter: cfg.trend || false,
+        cooldown: cfg.cool || false,
       });
 
+      const filters = (cfg.trend ? "T" : "") + (cfg.cool ? "C" : "") || "-";
+      const periodStr = cfg.period >= 365 ? "1y" : cfg.period >= 180 ? "6m" : "3m";
       results.push({
         strategy: STRAT_NAMES[strat],
-        config: `${cfg.tf} ${cfg.period}d x${cfg.lev} SL${cfg.sl}/TP${cfg.tp}`,
+        config: `${cfg.tf} ${periodStr} x${cfg.lev} SL${cfg.sl}/TP${cfg.tp} [${filters}]`,
+        filters,
+        period: cfg.period,
         ...res,
       });
     }
@@ -596,13 +660,13 @@ async function main() {
   results.sort((a, b) => b.pnlPct - a.pnlPct);
 
   /* print table */
-  console.log("┌─────────────────┬───────────────────────────┬──────────┬────────┬────────┬─────────┬─────┐");
-  console.log("│ Strategy        │ Config                    │  P&L %   │ Trades │ WR %   │ Max DD  │ Liq │");
-  console.log("├─────────────────┼───────────────────────────┼──────────┼────────┼────────┼─────────┼─────┤");
+  console.log("┌─────────────────┬─────────────────────────────────┬──────────┬────────┬────────┬─────────┬─────┐");
+  console.log("│ Strategy        │ Config                          │  P&L %   │ Trades │ WR %   │ Max DD  │ Liq │");
+  console.log("├─────────────────┼─────────────────────────────────┼──────────┼────────┼────────┼─────────┼─────┤");
 
   for (const r of results) {
     const strat = r.strategy.padEnd(15);
-    const config = r.config.padEnd(25);
+    const config = r.config.padEnd(31);
     const pnl = (r.pnlPct >= 0 ? "+" : "") + r.pnlPct.toFixed(1) + "%";
     const pnlPad = pnl.padStart(8);
     const trades = String(r.trades).padStart(6);
@@ -612,7 +676,7 @@ async function main() {
     const liq = String(r.liquidations).padStart(3);
     console.log(`│ ${strat} │ ${config} │ ${pnlPad} │ ${trades} │ ${wr} │ ${ddPad} │ ${liq} │`);
   }
-  console.log("└─────────────────┴───────────────────────────┴──────────┴────────┴────────┴─────────┴─────┘");
+  console.log("└─────────────────┴─────────────────────────────────┴──────────┴────────┴────────┴─────────┴─────┘");
 
   /* top 10 */
   console.log("\n🏆 TOP 10:");
