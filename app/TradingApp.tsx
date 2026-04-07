@@ -385,6 +385,41 @@ export default function TradingApp() {
   const [btResult, setBtResult] = useState<BtResult | null>(null);
   const [btProgress, setBtProgress] = useState("");
 
+  /* ═══ LEADERBOARD ═══ */
+  interface LeaderEntry {
+    id: string; created_at?: string; strategy: string; symbols: string[];
+    config: string; pnlPct: number; pnl: number; trades: number;
+    winRate: number; maxDD: number; liquidations: number;
+  }
+  const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
+  const [lbSort, setLbSort] = useState("pnlPct:desc");
+  const fetchLeaderboard = useCallback(async () => {
+    try {
+      const r = await fetch("/api/leaderboard");
+      if (!r.ok) return;
+      const rows = await r.json();
+      setLeaderboard(rows.map((r: any) => ({
+        id: r.id, created_at: r.created_at, strategy: r.strategy,
+        symbols: typeof r.symbols === "string" ? JSON.parse(r.symbols) : r.symbols,
+        config: r.config, pnlPct: r.pnl_pct, pnl: r.pnl, trades: r.trades,
+        winRate: r.win_rate, maxDD: r.max_dd, liquidations: r.liquidations,
+      })));
+    } catch {}
+  }, []);
+  useEffect(() => { fetchLeaderboard(); }, [fetchLeaderboard]);
+  const addToLeaderboard = async (entry: LeaderEntry) => {
+    try {
+      await fetch("/api/leaderboard", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry),
+      });
+      fetchLeaderboard();
+    } catch {}
+  };
+  const clearLeaderboard = async () => {
+    try { await fetch("/api/leaderboard", { method: "DELETE" }); setLeaderboard([]); } catch {}
+  };
+
   const BT_PERIODS: Record<string, { label: string; days: number }> = {
     "1m": { label: "1 місяць", days: 30 },
     "3m": { label: "3 місяці", days: 90 },
@@ -725,6 +760,24 @@ export default function TradingApp() {
     const winRate = closeTrades.length > 0 ? (wins.length / closeTrades.length) * 100 : 0;
 
     setBtResult({ trades, finalBalance: balance, startBalance: startBal, maxDrawdown: maxDd, winRate, totalTrades: trades.length, equity, liquidations, instrument: btInstrument });
+
+    /* auto-add to leaderboard */
+    const pnlVal = balance - startBal;
+    const pnlPctVal = (pnlVal / startBal) * 100;
+    const configStr = `${btInstrument === "FUTURES" ? `x${btLeverage}` : "SPOT"} · ${TIMEFRAMES[btTimeframe]?.label} · ${BT_PERIODS[btPeriod]?.label}${btSl ? ` SL${btSl}%` : ""}${btTp ? ` TP${btTp}%` : ""}`;
+    addToLeaderboard({
+      id: uid(),
+      strategy: STRATEGIES[btStrategy]?.name || btStrategy,
+      symbols: btSymbols.map((s) => NICE[s] || s),
+      config: configStr,
+      pnlPct: pnlPctVal,
+      pnl: pnlVal,
+      trades: trades.length,
+      winRate,
+      maxDD: maxDd,
+      liquidations,
+    });
+
     setBtProgress("");
     setBtRunning(false);
   };
@@ -2153,6 +2206,67 @@ export default function TradingApp() {
               </div>
             </>
           )}
+
+          {/* ═══ LEADERBOARD TABLE ═══ */}
+          {leaderboard.length > 0 && (() => {
+            const sortKeys = ["pnlPct", "pnl", "trades", "winRate", "maxDD"] as const;
+            type SortKey = typeof sortKeys[number];
+            const sortLabels: Record<SortKey, string> = { pnlPct: "P&L %", pnl: "P&L $", trades: "УГОД", winRate: "WIN %", maxDD: "MAX DD" };
+            const [sortKey, sortDir] = (lbSort || "pnlPct:desc").split(":") as [SortKey, string];
+            const sorted = [...leaderboard].sort((a, b) => {
+              const va = a[sortKey], vb = b[sortKey];
+              return sortDir === "asc" ? va - vb : vb - va;
+            });
+            const toggleSort = (key: SortKey) => {
+              if (sortKey === key) setLbSort(`${key}:${sortDir === "desc" ? "asc" : "desc"}`);
+              else setLbSort(`${key}:desc`);
+            };
+            const arrow = (key: SortKey) => sortKey === key ? (sortDir === "desc" ? " ▼" : " ▲") : "";
+            const thCls = "text-right py-1 cursor-pointer hover:text-yellow-400 transition-colors select-none";
+
+            return (
+            <div className={card}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-yellow-400 font-bold text-sm">🏆 ТОП СТРАТЕГІЙ ({leaderboard.length})</h3>
+                <button onClick={clearLeaderboard} className="text-[10px] text-gray-600 hover:text-red-400 transition-colors">Очистити</button>
+              </div>
+              <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500 sticky top-0 bg-[#111]">
+                      <th className="text-left py-1 w-6">#</th>
+                      <th className="text-left py-1">СТРАТЕГІЯ</th>
+                      <th className="text-left py-1">МОНЕТИ</th>
+                      <th className="text-left py-1">КОНФІГ</th>
+                      <th className={thCls} onClick={() => toggleSort("pnlPct")}>{sortLabels.pnlPct}{arrow("pnlPct")}</th>
+                      <th className={thCls} onClick={() => toggleSort("pnl")}>{sortLabels.pnl}{arrow("pnl")}</th>
+                      <th className={thCls} onClick={() => toggleSort("trades")}>{sortLabels.trades}{arrow("trades")}</th>
+                      <th className={thCls} onClick={() => toggleSort("winRate")}>{sortLabels.winRate}{arrow("winRate")}</th>
+                      <th className={thCls} onClick={() => toggleSort("maxDD")}>{sortLabels.maxDD}{arrow("maxDD")}</th>
+                      <th className="text-right py-1 text-[10px]">ЧАС</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.map((e, i) => (
+                      <tr key={e.id} className={`border-t border-[#222] ${i < 3 ? "bg-yellow-950/10" : ""}`}>
+                        <td className="py-1 text-gray-500 font-bold">{i + 1}</td>
+                        <td className="py-1 text-white font-semibold whitespace-nowrap text-[11px]">{e.strategy}</td>
+                        <td className="py-1 text-yellow-400 text-[10px]">{e.symbols.join(", ")}</td>
+                        <td className="py-1 text-gray-400 text-[10px] whitespace-nowrap">{e.config}</td>
+                        <td className={`py-1 text-right font-bold ${e.pnlPct >= 0 ? "text-green-400" : "text-red-400"}`}>{e.pnlPct >= 0 ? "+" : ""}{fmt(e.pnlPct, 1)}%</td>
+                        <td className={`py-1 text-right ${e.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{e.pnl >= 0 ? "+" : ""}${fmt(e.pnl)}</td>
+                        <td className="py-1 text-right text-white">{e.trades}</td>
+                        <td className={`py-1 text-right ${e.winRate >= 40 ? "text-green-400" : e.winRate >= 30 ? "text-yellow-400" : "text-red-400"}`}>{fmt(e.winRate, 1)}%</td>
+                        <td className="py-1 text-right text-red-400">-{fmt(e.maxDD, 1)}%</td>
+                        <td className="py-1 text-right text-gray-600 text-[9px] whitespace-nowrap">{e.created_at ? new Date(e.created_at).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            );
+          })()}
         </div>
       )}
 
