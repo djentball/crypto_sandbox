@@ -705,13 +705,17 @@ export default function TradingApp() {
           /* cooldown check */
           if (btCooldown && i < (cooldownUntil[sym] || 0)) { lastAction[sym] = action; return; }
 
-          /* trend filter: EMA(50) direction */
-          if (btTrendFilter && slice.length >= 50) {
-            const closes = slice.map((c: { c: number }) => c.c);
-            const ema50 = calcEMA(closes, 50);
-            if (ema50 !== null) {
-              if (action === "BUY" && price < ema50) { lastAction[sym] = action; return; }
-              if (action === "SELL" && price > ema50) { lastAction[sym] = action; return; }
+          /* volatility filter: ATR(14) vs ATR(50) — skip low-volatility (ranging) markets */
+          if (btTrendFilter && slice.length >= 51) {
+            const atrArr: number[] = [];
+            for (let a = 1; a < slice.length; a++) {
+              const tr = Math.max(slice[a].h - slice[a].l, Math.abs(slice[a].h - slice[a - 1].c), Math.abs(slice[a].l - slice[a - 1].c));
+              atrArr.push(tr);
+            }
+            if (atrArr.length >= 50) {
+              const atr14 = atrArr.slice(-14).reduce((s, v) => s + v, 0) / 14;
+              const atr50 = atrArr.slice(-50).reduce((s, v) => s + v, 0) / 50;
+              if (atr14 < atr50 * 0.8) { lastAction[sym] = action; return; } /* low vol → skip */
             }
           }
 
@@ -1558,12 +1562,17 @@ export default function TradingApp() {
         /* anti-repeat: don't repeat the same action twice in a row for same symbol */
         if (lastLog && lastLog.action === action) return;
 
-        /* trend filter: EMA(50) — only trade in trend direction */
-        if (st.trendFilter && h.length >= 50) {
-          const ema50 = calcEMA(h, 50);
-          if (ema50 !== null) {
-            if (action === "BUY" && price < ema50) return;
-            if (action === "SELL" && price > ema50) return;
+        /* volatility filter: ATR(14) vs ATR(50) — skip low-volatility (ranging) markets */
+        if (st.trendFilter && tfCandlesForSym.length >= 51) {
+          const atrArr: number[] = [];
+          for (let a = 1; a < tfCandlesForSym.length; a++) {
+            const tr = Math.max(tfCandlesForSym[a].h - tfCandlesForSym[a].l, Math.abs(tfCandlesForSym[a].h - tfCandlesForSym[a - 1].c), Math.abs(tfCandlesForSym[a].l - tfCandlesForSym[a - 1].c));
+            atrArr.push(tr);
+          }
+          if (atrArr.length >= 50) {
+            const atr14 = atrArr.slice(-14).reduce((s, v) => s + v, 0) / 14;
+            const atr50 = atrArr.slice(-50).reduce((s, v) => s + v, 0) / 50;
+            if (atr14 < atr50 * 0.8) return; /* low vol → skip */
           }
         }
 
@@ -2043,7 +2052,7 @@ export default function TradingApp() {
                     <input type="checkbox" checked={!!activeUser.strategy?.trendFilter} onChange={(e) => {
                       updateUser(activeUserId, (u) => ({ ...u, strategy: { ...u.strategy, trendFilter: e.target.checked } }));
                     }} className="accent-yellow-500" />
-                    <span className="text-[10px] text-gray-400">🧭 ТРЕНДОВИЙ ФІЛЬТР</span>
+                    <span className="text-[10px] text-gray-400">📊 VOL-ФІЛЬТР (ATR)</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" checked={!!activeUser.strategy?.cooldown} onChange={(e) => {
@@ -2181,7 +2190,7 @@ export default function TradingApp() {
             <div className="flex flex-wrap gap-4 mb-3">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={btTrendFilter} onChange={(e) => setBtTrendFilter(e.target.checked)} className="accent-yellow-500" />
-                <span className="text-xs text-gray-400">🧭 Трендовий фільтр (EMA50)</span>
+                <span className="text-xs text-gray-400">📊 Vol-фільтр (пропускає боковик)</span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={btCooldown} onChange={(e) => setBtCooldown(e.target.checked)} className="accent-yellow-500" />

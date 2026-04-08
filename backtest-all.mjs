@@ -400,14 +400,19 @@ async function fetchCandles(symbol, interval, startMs, endMs) {
   return allCandles;
 }
 
-/* ─── Trend filter: EMA(50) direction ─── */
-function getTrendDirection(candles, idx) {
-  if (idx < 50) return null; // not enough data
-  const closes = candles.slice(0, idx + 1).map(c => c.c);
-  const ema50 = calcEMA(closes, 50);
-  if (ema50 === null) return null;
-  const price = closes[closes.length - 1];
-  return price > ema50 ? "BULL" : "BEAR";
+/* ─── Volatility filter: ATR(14) vs ATR(50) — skip ranging markets ─── */
+function isLowVolatility(candles, idx) {
+  if (idx < 51) return false;
+  const slice = candles.slice(0, idx + 1);
+  const atrArr = [];
+  for (let a = 1; a < slice.length; a++) {
+    const tr = Math.max(slice[a].h - slice[a].l, Math.abs(slice[a].h - slice[a - 1].c), Math.abs(slice[a].l - slice[a - 1].c));
+    atrArr.push(tr);
+  }
+  if (atrArr.length < 50) return false;
+  const atr14 = atrArr.slice(-14).reduce((s, v) => s + v, 0) / 14;
+  const atr50 = atrArr.slice(-50).reduce((s, v) => s + v, 0) / 50;
+  return atr14 < atr50 * 0.8; /* low vol when recent ATR is 20%+ below average */
 }
 
 /* ─── Backtest engine (futures mode with no-flip when SL+TP set) ─── */
@@ -498,13 +503,9 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
     /* cooldown check */
     if (cooldown && i < cooldownUntil) { filteredByCooldown++; lastAction[sym] = action; continue; }
 
-    /* trend filter check */
+    /* volatility filter check */
     if (trendFilter) {
-      const trend = getTrendDirection(candles, i);
-      if (trend) {
-        if (action === "BUY" && trend === "BEAR") { filteredByTrend++; lastAction[sym] = action; continue; }
-        if (action === "SELL" && trend === "BULL") { filteredByTrend++; lastAction[sym] = action; continue; }
-      }
+      if (isLowVolatility(candles, i)) { filteredByTrend++; lastAction[sym] = action; continue; }
     }
 
     const existingPos = openPositions.find((p) => p.sym === sym);
