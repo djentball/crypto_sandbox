@@ -492,7 +492,7 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
 
     /* strategy signals */
     const sym = "BTCUSDT";
-    const slice = candles.slice(0, i + 1);
+    const slice = candles.slice(Math.max(0, i - 99), i + 1);
     if (slice.length < 5) continue;
     const price = slice[slice.length - 1].c;
     const sig = evalSignal(strategy, slice);

@@ -557,14 +557,24 @@ export default function TradingApp() {
     /* find max candle count to iterate */
     const maxLen = Math.max(...btSymbols.map((s) => candleMap[s]?.length || 0));
 
+    const yieldEvery = Math.max(20, Math.floor(maxLen / 200)); /* yield ~200 times for progress */
+    const startTime = Date.now();
+
     if (!isFutures) {
       /* ── SPOT MODE ── */
       const holdings: Record<string, number> = {};
       for (let i = 0; i < maxLen; i++) {
+        if (i % yieldEvery === 0) {
+          const pct = Math.round((i / maxLen) * 100);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          const eta = i > 0 ? Math.round(((Date.now() - startTime) / i * (maxLen - i)) / 1000) : 0;
+          setBtProgress(`Обробка свічок... ${pct}% (${i}/${maxLen}) · ${elapsed}с · ~${eta}с залишилось`);
+          await new Promise(r => setTimeout(r, 0));
+        }
         btSymbols.forEach((sym) => {
           const candles = candleMap[sym];
           if (!candles || i >= candles.length) return;
-          const slice = candles.slice(0, i + 1);
+          const slice = candles.slice(Math.max(0, i - 99), i + 1);
           if (slice.length < 5) return;
           const price = slice[slice.length - 1].c;
           const sig = evalSignal(btStrategy, slice);
@@ -623,6 +633,13 @@ export default function TradingApp() {
       const COOLDOWN_CANDLES = 5;
 
       for (let i = 0; i < maxLen; i++) {
+        if (i % yieldEvery === 0) {
+          const pct = Math.round((i / maxLen) * 100);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          const eta = i > 0 ? Math.round(((Date.now() - startTime) / i * (maxLen - i)) / 1000) : 0;
+          setBtProgress(`Обробка свічок... ${pct}% (${i}/${maxLen}) · ${elapsed}с · ~${eta}с залишилось`);
+          await new Promise(r => setTimeout(r, 0));
+        }
         /* check SL/TP/liquidation on open positions using candle OHLC */
         for (let p = openPositions.length - 1; p >= 0; p--) {
           const pos = openPositions[p];
@@ -694,7 +711,7 @@ export default function TradingApp() {
         btSymbols.forEach((sym) => {
           const candles = candleMap[sym];
           if (!candles || i >= candles.length) return;
-          const slice = candles.slice(0, i + 1);
+          const slice = candles.slice(Math.max(0, i - 99), i + 1);
           if (slice.length < 5) return;
           const price = slice[slice.length - 1].c;
           const sig = evalSignal(btStrategy, slice);
@@ -2199,8 +2216,18 @@ export default function TradingApp() {
             </div>
 
             <button onClick={runBacktest} disabled={btRunning || btSymbols.length === 0} className="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold text-xs px-6 py-2 rounded transition cursor-pointer">
-              {btRunning ? btProgress || "Завантаження..." : "🚀 ЗАПУСТИТИ БЕКТЕСТ"}
+              {btRunning ? "..." : "🚀 ЗАПУСТИТИ БЕКТЕСТ"}
             </button>
+            {btRunning && btProgress && (
+              <div className="mt-2">
+                <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                  <span>{btProgress}</span>
+                </div>
+                <div className="w-full bg-[#1a1a1a] rounded-full h-2 border border-[#333]">
+                  <div className="bg-purple-500 h-full rounded-full transition-all duration-200" style={{ width: `${parseInt(btProgress.match(/(\d+)%/)?.[1] || "0")}%` }} />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Results */}
