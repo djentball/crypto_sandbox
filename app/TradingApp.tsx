@@ -381,6 +381,7 @@ export default function TradingApp() {
   const [btSide, setBtSide] = useState<"AUTO" | "LONG" | "SHORT">("AUTO");
   const [btSl, setBtSl] = useState("");
   const [btTp, setBtTp] = useState("");
+  const [btCompound, setBtCompound] = useState(false); /* dynamic position sizing: notional = % of balance */
   const [btRunning, setBtRunning] = useState(false);
   const [btResult, setBtResult] = useState<BtResult | null>(null);
   const [btProgress, setBtProgress] = useState("");
@@ -732,7 +733,7 @@ export default function TradingApp() {
           /* open new position if no same-direction position exists */
           const samePos = openPositions.find((p) => p.sym === sym && p.side === fSide);
           if (fSide && !samePos) {
-            const notional = amtPerTrade;
+            const notional = btCompound ? Math.min(balance * (amtPerTrade / startBal), balance * 0.9) : amtPerTrade;
             const margin = notional / leverage;
             const openFee = notional * FUT_FEE;
             if (margin + openFee > balance) { lastAction[sym] = action; return; }
@@ -2126,6 +2127,13 @@ export default function TradingApp() {
                 ))}
               </div>
             </div>
+
+            {btInstrument === "FUTURES" && (
+              <label className="flex items-center gap-2 cursor-pointer mb-2">
+                <input type="checkbox" checked={btCompound} onChange={(e) => setBtCompound(e.target.checked)} className="accent-green-500" />
+                <span className="text-xs text-gray-400">📈 Компаундинг (notional = % балансу, прибуток реінвестується)</span>
+              </label>
+            )}
 
             <button onClick={runBacktest} disabled={btRunning || btSymbols.length === 0} className="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold text-xs px-6 py-2 rounded transition cursor-pointer">
               {btRunning ? "..." : "🚀 ЗАПУСТИТИ БЕКТЕСТ"}
