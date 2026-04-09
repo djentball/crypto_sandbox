@@ -2142,11 +2142,11 @@ export default function TradingApp() {
                   </div>
                   <div>
                     <label className="text-[10px] text-gray-500 block mb-1">STOP LOSS (%)</label>
-                    <input type="number" value={btSl} onChange={(e) => setBtSl(e.target.value)} placeholder="напр. 5" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+                    <input type="text" inputMode="decimal" value={btSl} onChange={(e) => { const v = e.target.value; if (v === "" || /^\d*\.?\d*$/.test(v)) setBtSl(v); }} placeholder="0 = вимкнено" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
                   </div>
                   <div>
                     <label className="text-[10px] text-gray-500 block mb-1">TAKE PROFIT (%)</label>
-                    <input type="number" value={btTp} onChange={(e) => setBtTp(e.target.value)} placeholder="напр. 10" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+                    <input type="text" inputMode="decimal" value={btTp} onChange={(e) => { const v = e.target.value; if (v === "" || /^\d*\.?\d*$/.test(v)) setBtTp(v); }} placeholder="0 = вимкнено" className="w-full bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
                   </div>
                 </>
               )}
