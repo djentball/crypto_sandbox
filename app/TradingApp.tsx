@@ -31,6 +31,7 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   scalp_pa: { name: "Scalp: Price Action", desc: "Патерни (подвійне дно/вершина, трикутники) біля 4H рівнів" },
   scalp_smc_ind: { name: "Scalp: SMC Inducement", desc: "Хибний пробій ліквідність-зони + імбалансна свічка поглинання" },
   scalp_sma_ema: { name: "Scalp: SMA(5)×EMA(9)", desc: "BUY коли SMA(5) перетинає EMA(9) знизу, SELL — зверху" },
+  grid: { name: "Grid Bot", desc: "Авто-діапазон: BUY на нижніх грідах, SELL на верхніх, заробляє в боковику" },
 };
 
 const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
@@ -521,6 +522,8 @@ export default function TradingApp() {
       if (sig === "bearish") return { action: "SELL", reason: "SMC Inducement ▼ (imbalance)" };
     } else if (strat === "scalp_sma_ema") {
       return detectSMA5xEMA9(slice);
+    } else if (strat === "grid") {
+      return detectGrid(slice);
     }
     return null;
   };
@@ -1379,6 +1382,36 @@ export default function TradingApp() {
     return null;
   };
 
+  /* ─── Grid Bot: auto-range grid trading ─── */
+  const GRID_LEVELS = 10; /* number of grid lines */
+  const GRID_LOOKBACK = 60; /* candles to determine range */
+  const detectGrid = (candles: Candle[]): { action: string; reason: string } | null => {
+    if (candles.length < GRID_LOOKBACK + 2) return null;
+    const lookback = candles.slice(-GRID_LOOKBACK - 2, -2); /* exclude last 2 for prev/cur comparison */
+    const low = Math.min(...lookback.map(c => c.l));
+    const high = Math.max(...lookback.map(c => c.h));
+    const range = high - low;
+    if (range <= 0) return null;
+    const gridSize = range / GRID_LEVELS;
+    const cur = candles[candles.length - 1];
+    const prev = candles[candles.length - 2];
+    /* find which grid level price crossed */
+    for (let g = 1; g < GRID_LEVELS; g++) {
+      const level = low + g * gridSize;
+      /* crossed down through grid → BUY */
+      if (prev.c >= level && cur.c < level) {
+        const gridNum = g;
+        return { action: "BUY", reason: `Grid ${gridNum}/${GRID_LEVELS} ▼ $${level.toFixed(2)}` };
+      }
+      /* crossed up through grid → SELL */
+      if (prev.c <= level && cur.c > level) {
+        const gridNum = g;
+        return { action: "SELL", reason: `Grid ${gridNum}/${GRID_LEVELS} ▲ $${level.toFixed(2)}` };
+      }
+    }
+    return null;
+  };
+
   const signals = useMemo(() => {
     return SYMBOLS.map((s) => {
       const h = priceHistory[s] || [];
@@ -1536,6 +1569,9 @@ export default function TradingApp() {
         } else if (st.type === "scalp_sma_ema") {
           const seSig = detectSMA5xEMA9(tfCandlesForSym);
           if (seSig) { action = seSig.action; reason = seSig.reason; }
+        } else if (st.type === "grid") {
+          const gridSig = detectGrid(tfCandlesForSym);
+          if (gridSig) { action = gridSig.action; reason = gridSig.reason; }
         }
         if (!action) return;
 
