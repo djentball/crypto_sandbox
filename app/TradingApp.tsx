@@ -707,7 +707,22 @@ export default function TradingApp() {
 
           /* determine futures side */
           let fSide: "LONG" | "SHORT" | null = null;
-          if (btSide === "AUTO") {
+          const isGridBot = btStrategy === "grid";
+          if (isGridBot) {
+            /* Grid bot: BUY → open LONG, SELL → just close LONG (no SHORT) */
+            if (action === "BUY") fSide = "LONG";
+            if (action === "SELL" && existingPos && existingPos.side === "LONG") {
+              /* close the LONG position for profit */
+              const pnl = ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage;
+              const closeFee = existingPos.notional * FUT_FEE;
+              balance += existingPos.margin + pnl - closeFee;
+              trades.push({ time, sym, action: "CLOSE LONG", price, amount: existingPos.notional, fee: closeFee, reason, balance, pnl });
+              openPositions.splice(openPositions.indexOf(existingPos), 1);
+              lastAction[sym] = action;
+              return;
+            }
+            if (action === "SELL") { lastAction[sym] = action; return; } /* no position to close */
+          } else if (btSide === "AUTO") {
             if (action === "BUY") fSide = "LONG";
             if (action === "SELL") fSide = "SHORT";
           } else if (btSide === "LONG" && action === "BUY") {
@@ -1385,9 +1400,10 @@ export default function TradingApp() {
   /* ─── Grid Bot: auto-range grid trading ─── */
   const GRID_LEVELS = 10; /* number of grid lines */
   const GRID_LOOKBACK = 60; /* candles to determine range */
+  const gridLastBuyLevel: Record<string, number> = {}; /* track last buy grid per symbol */
   const detectGrid = (candles: Candle[]): { action: string; reason: string } | null => {
     if (candles.length < GRID_LOOKBACK + 2) return null;
-    const lookback = candles.slice(-GRID_LOOKBACK - 2, -2); /* exclude last 2 for prev/cur comparison */
+    const lookback = candles.slice(-GRID_LOOKBACK - 2, -2);
     const low = Math.min(...lookback.map(c => c.l));
     const high = Math.max(...lookback.map(c => c.h));
     const range = high - low;
@@ -1395,19 +1411,19 @@ export default function TradingApp() {
     const gridSize = range / GRID_LEVELS;
     const cur = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
-    /* find which grid level price crossed */
-    for (let g = 1; g < GRID_LEVELS; g++) {
-      const level = low + g * gridSize;
-      /* crossed down through grid → BUY */
-      if (prev.c >= level && cur.c < level) {
-        const gridNum = g;
-        return { action: "BUY", reason: `Grid ${gridNum}/${GRID_LEVELS} ▼ $${level.toFixed(2)}` };
-      }
-      /* crossed up through grid → SELL */
-      if (prev.c <= level && cur.c > level) {
-        const gridNum = g;
-        return { action: "SELL", reason: `Grid ${gridNum}/${GRID_LEVELS} ▲ $${level.toFixed(2)}` };
-      }
+    /* determine current grid zone (0 = below lowest, GRID_LEVELS = above highest) */
+    const curZone = Math.floor((cur.c - low) / gridSize);
+    const prevZone = Math.floor((prev.c - low) / gridSize);
+    if (curZone === prevZone) return null; /* no grid crossing */
+    /* price moved DOWN through a grid line → BUY zone (accumulate) */
+    if (curZone < prevZone && curZone >= 0 && curZone < GRID_LEVELS) {
+      const level = low + (curZone + 1) * gridSize;
+      return { action: "BUY", reason: `Grid ▼ зона ${curZone + 1}/${GRID_LEVELS} ($${level.toFixed(2)})` };
+    }
+    /* price moved UP through a grid line → SELL zone (take profit) */
+    if (curZone > prevZone && curZone > 0 && curZone <= GRID_LEVELS) {
+      const level = low + curZone * gridSize;
+      return { action: "SELL", reason: `Grid ▲ зона ${curZone}/${GRID_LEVELS} ($${level.toFixed(2)})` };
     }
     return null;
   };

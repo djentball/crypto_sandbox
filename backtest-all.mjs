@@ -532,6 +532,22 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
     }
 
     const existingPos = openPositions.find((p) => p.sym === sym);
+    const isGrid = strategy === "grid";
+
+    /* Grid bot: BUY → open LONG, SELL → close LONG only (no SHORT) */
+    if (isGrid) {
+      if (action === "SELL" && existingPos && existingPos.side === "LONG") {
+        const pnl = ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage;
+        const closeFee = existingPos.notional * FUT_FEE;
+        balance += existingPos.margin + pnl - closeFee;
+        openPositions.splice(openPositions.indexOf(existingPos), 1);
+        trades.push({ pnl, type: pnl > 0 ? "TP" : "SL" });
+        lastAction[sym] = action;
+        continue;
+      }
+      if (action === "SELL") { lastAction[sym] = action; continue; }
+    }
+
     let fSide = action === "BUY" ? "LONG" : "SHORT";
 
     /* no-flip when SL+TP set */
