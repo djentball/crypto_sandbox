@@ -31,7 +31,7 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   scalp_pa: { name: "Scalp: Price Action", desc: "Патерни (подвійне дно/вершина, трикутники) біля 4H рівнів" },
   scalp_smc_ind: { name: "Scalp: SMC Inducement", desc: "Хибний пробій ліквідність-зони + імбалансна свічка поглинання" },
   scalp_sma_ema: { name: "Scalp: SMA(5)×EMA(9)", desc: "BUY коли SMA(5) перетинає EMA(9) знизу, SELL — зверху" },
-  grid: { name: "Grid Bot", desc: "Авто-діапазон: BUY на нижніх грідах, SELL на верхніх, заробляє в боковику" },
+  grid: { name: "Grid Bot", desc: "Мульти-позиція: 8 рівнів, до 5 LONG одночасно, TP=1 грід вверх, SL=1.5 гріди вниз" },
 };
 
 const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
@@ -416,12 +416,16 @@ export default function TradingApp() {
   useEffect(() => { fetchLeaderboard(); }, [fetchLeaderboard]);
   const addToLeaderboard = async (entry: LeaderEntry) => {
     try {
-      await fetch("/api/leaderboard", {
+      const res = await fetch("/api/leaderboard", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(entry),
       });
+      if (!res.ok) {
+        const err = await res.text();
+        console.error("Leaderboard save failed:", res.status, err);
+      }
       fetchLeaderboard();
-    } catch {}
+    } catch (e) { console.error("Leaderboard save error:", e); }
   };
   const clearLeaderboard = async () => {
     try { await fetch("/api/leaderboard", { method: "DELETE" }); setLeaderboard([]); } catch {}
@@ -620,6 +624,130 @@ export default function TradingApp() {
         const held = holdings[sym] || 0;
         if (held > 0) { const lp = candleMap[sym]?.[candleMap[sym].length - 1]?.c || 0; balance += held * lp * (1 - SPOT_FEE); }
       });
+    } else if (btStrategy === "grid" && isFutures) {
+      /* ── GRID BOT FUTURES MODE ── dedicated multi-position engine */
+      const GRID_N = 8;
+      const GRID_LOOKBACK = 100;
+      const MAX_GRID_POS = 5;
+      const leverage = btLeverage;
+      interface GridPos { sym: string; entry: number; margin: number; notional: number; leverage: number; tp: number; sl: number; }
+      const gridPositions: GridPos[] = [];
+
+      for (let i = 0; i < maxLen; i++) {
+        if (i % yieldEvery === 0) {
+          const pct = Math.round((i / maxLen) * 100);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          const eta = i > 0 ? Math.round(((Date.now() - startTime) / i * (maxLen - i)) / 1000) : 0;
+          setBtProgress(`Обробка свічок... ${pct}% (${i}/${maxLen}) · ${elapsed}с · ~${eta}с залишилось`);
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        btSymbols.forEach((sym) => {
+          const candles = candleMap[sym];
+          if (!candles || i >= candles.length) return;
+          const candle = candles[i];
+
+          /* calculate grid range from lookback */
+          const lookStart = Math.max(0, i - GRID_LOOKBACK);
+          const lookSlice = candles.slice(lookStart, i);
+          if (lookSlice.length < 30) return;
+          const rangeLow = Math.min(...lookSlice.map(c => c.l));
+          const rangeHigh = Math.max(...lookSlice.map(c => c.h));
+          const gridSize = (rangeHigh - rangeLow) / GRID_N;
+          if (gridSize <= 0) return;
+
+          /* check open positions for TP / SL / liquidation */
+          for (let p = gridPositions.length - 1; p >= 0; p--) {
+            const pos = gridPositions[p];
+            if (pos.sym !== sym) continue;
+
+            /* liquidation: PnL <= -margin * 0.9 */
+            const worstPnl = ((candle.l - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+            if (worstPnl <= -pos.margin * 0.9) {
+              trades.push({ time: candle.t, sym, action: "LIQ LONG", price: candle.l, amount: pos.notional, fee: 0, reason: "Grid ліквідація", balance, pnl: -pos.margin });
+              liquidations++;
+              gridPositions.splice(p, 1);
+              continue;
+            }
+
+            /* TP hit: candle high reached take-profit */
+            if (candle.h >= pos.tp) {
+              const pnl = ((pos.tp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+              const closeFee = pos.notional * FUT_FEE;
+              balance += pos.margin + pnl - closeFee;
+              trades.push({ time: candle.t, sym, action: "TP LONG", price: pos.tp, amount: pos.notional, fee: closeFee, reason: `Grid TP +${((pos.tp - pos.entry) / pos.entry * 100).toFixed(1)}%`, balance, pnl });
+              gridPositions.splice(p, 1);
+              continue;
+            }
+
+            /* SL hit: candle low reached stop-loss */
+            if (candle.l <= pos.sl) {
+              const pnl = ((pos.sl - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+              const closeFee = pos.notional * FUT_FEE;
+              balance += pos.margin + pnl - closeFee;
+              trades.push({ time: candle.t, sym, action: "SL LONG", price: pos.sl, amount: pos.notional, fee: closeFee, reason: `Grid SL -${((pos.entry - pos.sl) / pos.entry * 100).toFixed(1)}%`, balance, pnl });
+              gridPositions.splice(p, 1);
+              continue;
+            }
+          }
+
+          /* open new LONGs at grid levels price dropped through */
+          const symPositions = gridPositions.filter(p => p.sym === sym);
+          if (symPositions.length >= MAX_GRID_POS) return;
+          if (i === 0) return; /* need prev candle */
+
+          const prevClose = candles[i - 1].c;
+          for (let z = GRID_N - 1; z >= 1; z--) { /* skip zone 0 (bottom) */
+            if (symPositions.length >= MAX_GRID_POS) break;
+            const gridLevel = rangeLow + z * gridSize;
+
+            /* price crossed DOWN through this grid level */
+            if (prevClose > gridLevel && candle.l <= gridLevel) {
+              /* check no existing position near this level */
+              const tooClose = symPositions.some(p => Math.abs(p.entry - gridLevel) < gridSize * 0.5);
+              if (tooClose) continue;
+
+              const entry = gridLevel;
+              const tp = entry + gridSize; /* TP at next grid up */
+              const sl = entry - gridSize * 1.5; /* SL at 1.5 grids below */
+              const notional = btCompound ? Math.min(balance * (amtPerTrade / startBal), balance * 0.9) : amtPerTrade;
+              const margin = notional / leverage;
+              const openFee = notional * FUT_FEE;
+              if (margin + openFee > balance) continue;
+
+              balance -= margin + openFee;
+              const newPos: GridPos = { sym, entry, margin, notional, leverage, tp, sl };
+              gridPositions.push(newPos);
+              symPositions.push(newPos);
+              trades.push({ time: candle.t, sym, action: "OPEN LONG", price: entry, amount: notional, fee: openFee, reason: `Grid BUY зона ${z}/${GRID_N} (TP ${tp.toFixed(2)} SL ${sl.toFixed(2)})`, balance });
+            }
+          }
+        });
+
+        /* record equity */
+        if (i % 10 === 0 || i === maxLen - 1) {
+          let eq = balance;
+          gridPositions.forEach((pos) => {
+            const c = candleMap[pos.sym];
+            if (!c) return;
+            const cp = c[Math.min(i, c.length - 1)]?.c || pos.entry;
+            const pnl = ((cp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+            eq += pos.margin + pnl;
+          });
+          const t = candleMap[btSymbols[0]]?.[Math.min(i, (candleMap[btSymbols[0]]?.length || 1) - 1)]?.t || 0;
+          equity.push({ t, v: eq });
+        }
+      }
+
+      /* close remaining grid positions at last price */
+      gridPositions.forEach((pos) => {
+        const c = candleMap[pos.sym];
+        const lp = c?.[c.length - 1]?.c || pos.entry;
+        const pnl = ((lp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+        const closeFee = pos.notional * FUT_FEE;
+        balance += pos.margin + pnl - closeFee;
+      });
+
     } else {
       /* ── FUTURES MODE ── */
       interface BtFuture { sym: string; side: "LONG" | "SHORT"; entry: number; margin: number; notional: number; leverage: number; sl?: number; tp?: number; }
@@ -707,22 +835,7 @@ export default function TradingApp() {
 
           /* determine futures side */
           let fSide: "LONG" | "SHORT" | null = null;
-          const isGridBot = btStrategy === "grid";
-          if (isGridBot) {
-            /* Grid bot: BUY → open LONG, SELL → just close LONG (no SHORT) */
-            if (action === "BUY") fSide = "LONG";
-            if (action === "SELL" && existingPos && existingPos.side === "LONG") {
-              /* close the LONG position for profit */
-              const pnl = ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage;
-              const closeFee = existingPos.notional * FUT_FEE;
-              balance += existingPos.margin + pnl - closeFee;
-              trades.push({ time, sym, action: "CLOSE LONG", price, amount: existingPos.notional, fee: closeFee, reason, balance, pnl });
-              openPositions.splice(openPositions.indexOf(existingPos), 1);
-              lastAction[sym] = action;
-              return;
-            }
-            if (action === "SELL") { lastAction[sym] = action; return; } /* no position to close */
-          } else if (btSide === "AUTO") {
+          if (btSide === "AUTO") {
             if (action === "BUY") fSide = "LONG";
             if (action === "SELL") fSide = "SHORT";
           } else if (btSide === "LONG" && action === "BUY") {
