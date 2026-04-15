@@ -368,6 +368,7 @@ export default function TradingApp() {
 
   const [instrument, setInstrument] = useState("SPOT");
   const [view, setView] = useState("market");
+  const [sigTf, setSigTf] = useState("15m");
 
   /* ═══ BACKTEST STATE ═══ */
   interface BtTrade { time: number; sym: string; action: string; price: number; amount: number; fee: number; reason: string; balance: number; pnl?: number; }
@@ -1544,7 +1545,8 @@ export default function TradingApp() {
 
   const signals = useMemo(() => {
     return SYMBOLS.map((s) => {
-      const h = priceHistory[s] || [];
+      const candles = sigTf === "15m" ? (candleHistory[s] || []) : (tfCandles[sigTf]?.[s] || []);
+      const h = candles.map((c) => c.c);
       const rsi = calcRSI(h);
       const sma7 = calcSMA(h, 7);
       const sma14 = calcSMA(h, 14);
@@ -1565,7 +1567,6 @@ export default function TradingApp() {
         else { macdSignal = "BEARISH ▼"; macdColor = "text-red-400"; }
       }
       /* SMC signals */
-      const candles = candleHistory[s] || [];
       const swings = findSwings(candles);
       const bos = detectBOS(candles, swings);
       const fvg = detectFVG(candles);
@@ -1588,7 +1589,7 @@ export default function TradingApp() {
 
       return { sym: s, rsi, rsiSignal, rsiColor, sma7, sma14, trend, trendColor, macdData, macdSignal, macdColor, bos, fvg, ob, smcSignal, smcColor };
     });
-  }, [priceHistory, candleHistory]);
+  }, [sigTf, candleHistory, tfCandles]);
 
   /* auto-load candles when user changes strategy timeframe */
   useEffect(() => {
@@ -2129,8 +2130,14 @@ export default function TradingApp() {
       {/* ═══ SIGNALS ═══ */}
       {view === "signals" && (
         <div className={card}>
-          <h2 className="text-green-400 font-bold text-sm mb-3">СИГНАЛИ</h2>
-          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7/14) · MACD(12,26,9) · SMC (BOS / FVG / OB) · Дані з Binance 15-хв свічок (OHLC)</p>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-green-400 font-bold text-sm">СИГНАЛИ</h2>
+            <div className="flex gap-1">{Object.entries(TIMEFRAMES).map(([key, tf]) => (
+              <button key={key} onClick={() => { setSigTf(key); if (key !== "15m") loadTimeframeCandles(key); }}
+                className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer ${sigTf === key ? "bg-green-600 text-white" : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>{tf.label}</button>
+            ))}</div>
+          </div>
+          <p className="text-[10px] text-gray-600 mb-3">RSI(14) · SMA(7/14) · MACD(12,26,9) · SMC (BOS / FVG / OB) · Binance {TIMEFRAMES[sigTf]?.label} свічки</p>
           <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-gray-500 text-xs"><th className="text-left py-1">ПАРА</th><th className="text-center py-1">RSI</th><th className="text-center py-1">RSI СИГ.</th><th className="text-center py-1">SMA</th><th className="text-center py-1">MACD</th><th className="text-center py-1">SMC</th></tr></thead>
             <tbody>{signals.map((s) => (
               <tr key={s.sym} className="border-t border-[#222]">
