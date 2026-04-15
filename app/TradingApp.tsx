@@ -54,6 +54,7 @@ interface Future {
   entry: number; margin: number; notional: number; fee: number;
   openTime: string; liquidated: boolean; liqTime?: string;
   sl?: number; tp?: number; closedBySl?: boolean; closedByTp?: boolean;
+  closePrice?: number; closePnl?: number;
 }
 interface Strategy {
   type: string; symbols: string[]; amountPerTrade: number; timeframe: string;
@@ -1033,7 +1034,7 @@ export default function TradingApp() {
           /* Liquidation */
           if (pnl <= -f.margin * 0.9) {
             changed = true;
-            return { ...f, liquidated: true, liqTime: ts() };
+            return { ...f, liquidated: true, liqTime: ts(), closePrice: cp, closePnl: -f.margin };
           }
 
           /* Stop Loss */
@@ -1048,7 +1049,7 @@ export default function TradingApp() {
             const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `SL ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl, sl: f.sl, tp: f.tp };
             newTrades.push(trade);
             api.recordTrade(u.id, trade);
-            return { ...f, closedBySl: true, liqTime: ts() };
+            return { ...f, closedBySl: true, liqTime: ts(), closePrice: cp, closePnl: pnl - closeFee };
           }
 
           /* Take Profit */
@@ -1063,7 +1064,7 @@ export default function TradingApp() {
             const trade: Trade = { id: uid(), time: ts(), sym: f.sym, inst: "FUTURES", side: `TP ${f.side}`, price: cp, amount: f.notional, fee: closeFee, qty: pnl, sl: f.sl, tp: f.tp };
             newTrades.push(trade);
             api.recordTrade(u.id, trade);
-            return { ...f, closedByTp: true, liqTime: ts() };
+            return { ...f, closedByTp: true, liqTime: ts(), closePrice: cp, closePnl: pnl - closeFee };
           }
 
           return f;
@@ -2054,10 +2055,10 @@ export default function TradingApp() {
             <p className="text-sm text-gray-500 mb-3">Кожна картка — одна відкрита позиція. Закрийте кнопкою CLOSE або дочекайтесь SL/TP/ліквідації.</p>
             {activeUser.futures.length === 0 ? <p className="text-gray-500 text-sm">Немає відкритих futures-позицій. Перейдіть у вкладку TRADE → FUTURES щоб відкрити.</p> : (
               <div className="space-y-4">{activeUser.futures.map((f) => {
-                const cp = prices[f.sym] || f.entry;
-                const dp = f.entry < 1 ? 4 : 2;
                 const isClosed = f.liquidated || f.closedBySl || f.closedByTp;
-                const pnl = f.liquidated ? -f.margin : f.side === "LONG" ? ((cp - f.entry) / f.entry) * f.margin * f.leverage : ((f.entry - cp) / f.entry) * f.margin * f.leverage;
+                const cp = isClosed ? (f.closePrice || f.entry) : (prices[f.sym] || f.entry);
+                const dp = f.entry < 1 ? 4 : 2;
+                const pnl = isClosed && f.closePnl !== undefined ? f.closePnl : (f.liquidated ? -f.margin : f.side === "LONG" ? ((cp - f.entry) / f.entry) * f.margin * f.leverage : ((f.entry - cp) / f.entry) * f.margin * f.leverage);
                 const pnlP = f.margin > 0 ? (pnl / f.margin) * 100 : 0;
                 const roe = pnlP;
                 const liqPrice = f.side === "LONG"
@@ -2083,18 +2084,18 @@ export default function TradingApp() {
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
                       <div className="text-gray-500">Ціна входу:</div><div className="text-white font-medium">${fmt(f.entry, dp)}</div>
-                      <div className="text-gray-500">Поточна ціна:</div><div className="text-white font-medium">${fmt(cp, dp)} <span className={cp >= f.entry ? "text-green-500" : "text-red-500"}>({cp >= f.entry ? "+" : ""}{fmt((cp - f.entry) / f.entry * 100, 2)}%)</span></div>
+                      <div className="text-gray-500">{isClosed ? "Ціна закриття:" : "Поточна ціна:"}</div><div className="text-white font-medium">${fmt(cp, dp)} <span className={cp >= f.entry ? "text-green-500" : "text-red-500"}>({cp >= f.entry ? "+" : ""}{fmt((cp - f.entry) / f.entry * 100, 2)}%)</span></div>
                       <div className="text-gray-500">Маржа (застава):</div><div className="text-white font-medium">${fmt(f.margin)}</div>
                       <div className="text-gray-500">Розмір позиції:</div><div className="text-white font-medium">${fmt(f.notional)}</div>
-                      <div className="text-gray-500">Ліквідація при:</div><div className="text-red-400 font-medium">${fmt(liqPrice, dp)} <span className="text-gray-500 text-xs">({fmt(distToLiq, 1)}% від поточної)</span></div>
+                      {!isClosed && <><div className="text-gray-500">Ліквідація при:</div><div className="text-red-400 font-medium">${fmt(liqPrice, dp)} <span className="text-gray-500 text-xs">({fmt(distToLiq, 1)}% від поточної)</span></div></>}
                     </div>
                     {(f.sl || f.tp) && (
                       <div className="mt-3 pt-3 border-t border-[#222] grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                        {f.sl && <><div className="text-gray-500">Stop Loss:</div><div className={isClosed ? "text-gray-500 line-through" : "text-red-400 font-medium"}>${fmt(f.sl, dp)} <span className="text-xs">({f.side === "LONG" ? "-" : "+"}{fmt(Math.abs((f.sl - f.entry) / f.entry * 100), 1)}% від входу)</span></div></>}
-                        {f.tp && <><div className="text-gray-500">Take Profit:</div><div className={isClosed ? "text-gray-500 line-through" : "text-green-400 font-medium"}>${fmt(f.tp, dp)} <span className="text-xs">({f.side === "LONG" ? "+" : "-"}{fmt(Math.abs((f.tp - f.entry) / f.entry * 100), 1)}% від входу)</span></div></>}
+                        {f.sl && <><div className="text-gray-500">Stop Loss:</div><div className={f.closedBySl ? "text-red-400 font-bold" : isClosed ? "text-gray-600" : "text-red-400 font-medium"}>{f.closedBySl ? "⚡ " : ""}${fmt(f.sl, dp)} <span className="text-xs">({f.side === "LONG" ? "-" : "+"}{fmt(Math.abs((f.sl - f.entry) / f.entry * 100), 1)}% від входу){f.closedBySl ? " — СПРАЦЮВАВ" : ""}</span></div></>}
+                        {f.tp && <><div className="text-gray-500">Take Profit:</div><div className={f.closedByTp ? "text-green-400 font-bold" : isClosed ? "text-gray-600" : "text-green-400 font-medium"}>{f.closedByTp ? "⚡ " : ""}${fmt(f.tp, dp)} <span className="text-xs">({f.side === "LONG" ? "+" : "-"}{fmt(Math.abs((f.tp - f.entry) / f.entry * 100), 1)}% від входу){f.closedByTp ? " — СПРАЦЮВАВ" : ""}</span></div></>}
                       </div>
                     )}
-                    {!isClosed && <p className="text-xs text-gray-600 mt-3">{f.side === "LONG" ? "📈 Прибуток коли ціна росте" : "📉 Прибуток коли ціна падає"} · Відкрито: {f.openTime}</p>}
+                    <p className="text-xs text-gray-600 mt-3">{isClosed ? `Відкрито: ${f.openTime} · Закрито: ${f.liqTime || "—"}` : `${f.side === "LONG" ? "📈 Прибуток коли ціна росте" : "📉 Прибуток коли ціна падає"} · Відкрито: ${f.openTime}`}</p>
                   </div>
                 );
               })}</div>
