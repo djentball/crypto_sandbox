@@ -31,7 +31,7 @@ const STRATEGIES: Record<string, { name: string; desc: string }> = {
   scalp_pa: { name: "Scalp: Price Action", desc: "Патерни (подвійне дно/вершина, трикутники) біля 4H рівнів" },
   scalp_smc_ind: { name: "Scalp: SMC Inducement", desc: "Хибний пробій ліквідність-зони + імбалансна свічка поглинання" },
   scalp_sma_ema: { name: "Scalp: SMA(5)×EMA(9)", desc: "BUY коли SMA(5) перетинає EMA(9) знизу, SELL — зверху" },
-  grid: { name: "Grid Bot", desc: "Мульти-позиція: 8 рівнів, до 5 LONG одночасно, TP=1 грід вверх, SL=1.5 гріди вниз" },
+  grid: { name: "Grid Bot", desc: "10 рівнів, до 6 LONG, TP=1 грід вверх, без SL (тримає до відновлення). SL% = макс. просадка портфеля" },
 };
 
 const TIMEFRAMES: Record<string, { label: string; ms: number; binance: string }> = {
@@ -627,13 +627,16 @@ export default function TradingApp() {
         if (held > 0) { const lp = candleMap[sym]?.[candleMap[sym].length - 1]?.c || 0; balance += held * lp * (1 - SPOT_FEE); }
       });
     } else if (btStrategy === "grid" && isFutures) {
-      /* ── GRID BOT FUTURES MODE ── dedicated multi-position engine */
-      const GRID_N = 8;
-      const GRID_LOOKBACK = 100;
-      const MAX_GRID_POS = 5;
+      /* ── GRID BOT FUTURES MODE ── proper multi-position, no per-position SL */
+      const GRID_N = 10;
+      const GRID_LOOKBACK = 120;
+      const MAX_GRID_POS = 6;
       const leverage = btLeverage;
-      interface GridPos { sym: string; entry: number; margin: number; notional: number; leverage: number; tp: number; sl: number; }
+      const userSlPct = btSl ? parseFloat(btSl) : 0; /* overall equity stop: 0 = disabled */
+      interface GridPos { sym: string; entry: number; margin: number; notional: number; leverage: number; tp: number; gridLevel: number; }
       const gridPositions: GridPos[] = [];
+      let gridStopped = false; /* overall equity stop triggered */
+      let peakEquity = startBal;
 
       for (let i = 0; i < maxLen; i++) {
         if (i % yieldEvery === 0) {
@@ -642,6 +645,42 @@ export default function TradingApp() {
           const eta = i > 0 ? Math.round(((Date.now() - startTime) / i * (maxLen - i)) / 1000) : 0;
           setBtProgress(`Обробка свічок... ${pct}% (${i}/${maxLen}) · ${elapsed}с · ~${eta}с залишилось`);
           await new Promise(r => setTimeout(r, 0));
+        }
+
+        /* overall equity check (using SL% field as max drawdown stop) */
+        if (!gridStopped && userSlPct > 0) {
+          let eq = balance;
+          gridPositions.forEach((pos) => {
+            const c = candleMap[pos.sym];
+            if (!c || i >= c.length) return;
+            const cp = c[i].c;
+            const pnl = ((cp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+            eq += pos.margin + pnl;
+          });
+          if (eq > peakEquity) peakEquity = eq;
+          const dd = (peakEquity - eq) / peakEquity * 100;
+          if (dd >= userSlPct) {
+            /* close all positions and stop */
+            gridPositions.forEach((pos) => {
+              const c = candleMap[pos.sym];
+              const cp = c?.[i]?.c || pos.entry;
+              const pnl = ((cp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
+              const closeFee = pos.notional * FUT_FEE;
+              balance += pos.margin + pnl - closeFee;
+              trades.push({ time: c?.[i]?.t || 0, sym: pos.sym, action: "CLOSE LONG", price: cp, amount: pos.notional, fee: closeFee, reason: `Grid STOP: DD ${dd.toFixed(1)}% >= ${userSlPct}%`, balance, pnl });
+            });
+            gridPositions.length = 0;
+            gridStopped = true;
+          }
+        }
+
+        if (gridStopped) {
+          /* still record equity for chart */
+          if (i % 10 === 0 || i === maxLen - 1) {
+            const t = candleMap[btSymbols[0]]?.[Math.min(i, (candleMap[btSymbols[0]]?.length || 1) - 1)]?.t || 0;
+            equity.push({ t, v: balance });
+          }
+          continue;
         }
 
         btSymbols.forEach((sym) => {
@@ -658,7 +697,7 @@ export default function TradingApp() {
           const gridSize = (rangeHigh - rangeLow) / GRID_N;
           if (gridSize <= 0) return;
 
-          /* check open positions for TP / SL / liquidation */
+          /* check open positions: TP and liquidation only (NO per-position SL) */
           for (let p = gridPositions.length - 1; p >= 0; p--) {
             const pos = gridPositions[p];
             if (pos.sym !== sym) continue;
@@ -672,7 +711,7 @@ export default function TradingApp() {
               continue;
             }
 
-            /* TP hit: candle high reached take-profit */
+            /* TP hit: candle high reached take-profit (next grid level up) */
             if (candle.h >= pos.tp) {
               const pnl = ((pos.tp - pos.entry) / pos.entry) * pos.margin * pos.leverage;
               const closeFee = pos.notional * FUT_FEE;
@@ -682,46 +721,38 @@ export default function TradingApp() {
               continue;
             }
 
-            /* SL hit: candle low reached stop-loss */
-            if (candle.l <= pos.sl) {
-              const pnl = ((pos.sl - pos.entry) / pos.entry) * pos.margin * pos.leverage;
-              const closeFee = pos.notional * FUT_FEE;
-              balance += pos.margin + pnl - closeFee;
-              trades.push({ time: candle.t, sym, action: "SL LONG", price: pos.sl, amount: pos.notional, fee: closeFee, reason: `Grid SL -${((pos.entry - pos.sl) / pos.entry * 100).toFixed(1)}%`, balance, pnl });
-              gridPositions.splice(p, 1);
-              continue;
-            }
+            /* NO SL — grid bot holds positions until TP or liquidation */
           }
 
           /* open new LONGs at grid levels price dropped through */
           const symPositions = gridPositions.filter(p => p.sym === sym);
           if (symPositions.length >= MAX_GRID_POS) return;
-          if (i === 0) return; /* need prev candle */
+          if (i === 0) return;
 
           const prevClose = candles[i - 1].c;
-          for (let z = GRID_N - 1; z >= 1; z--) { /* skip zone 0 (bottom) */
+          /* only open in lower 70% of grid (avoid buying at the top) */
+          const maxZone = Math.floor(GRID_N * 0.7);
+          for (let z = maxZone; z >= 1; z--) {
             if (symPositions.length >= MAX_GRID_POS) break;
             const gridLevel = rangeLow + z * gridSize;
 
             /* price crossed DOWN through this grid level */
             if (prevClose > gridLevel && candle.l <= gridLevel) {
-              /* check no existing position near this level */
-              const tooClose = symPositions.some(p => Math.abs(p.entry - gridLevel) < gridSize * 0.5);
+              const tooClose = symPositions.some(p => Math.abs(p.entry - gridLevel) < gridSize * 0.3);
               if (tooClose) continue;
 
               const entry = gridLevel;
               const tp = entry + gridSize; /* TP at next grid up */
-              const sl = entry - gridSize * 1.5; /* SL at 1.5 grids below */
               const notional = btCompound ? Math.min(balance * (amtPerTrade / startBal), balance * 0.9) : amtPerTrade;
               const margin = notional / leverage;
               const openFee = notional * FUT_FEE;
               if (margin + openFee > balance) continue;
 
               balance -= margin + openFee;
-              const newPos: GridPos = { sym, entry, margin, notional, leverage, tp, sl };
+              const newPos: GridPos = { sym, entry, margin, notional, leverage, tp, gridLevel: z };
               gridPositions.push(newPos);
               symPositions.push(newPos);
-              trades.push({ time: candle.t, sym, action: "OPEN LONG", price: entry, amount: notional, fee: openFee, reason: `Grid BUY зона ${z}/${GRID_N} (TP ${tp.toFixed(2)} SL ${sl.toFixed(2)})`, balance });
+              trades.push({ time: candle.t, sym, action: "OPEN LONG", price: entry, amount: notional, fee: openFee, reason: `Grid BUY зона ${z}/${GRID_N} (TP ${tp.toFixed(2)})`, balance });
             }
           }
         });
@@ -2057,7 +2088,9 @@ export default function TradingApp() {
             {activeUser.futures.length === 0 ? <p className="text-gray-500 text-sm">Немає відкритих futures-позицій. Перейдіть у вкладку TRADE → FUTURES щоб відкрити.</p> : (
               <div className="space-y-4">{activeUser.futures.map((f) => {
                 const isClosed = f.liquidated || f.closedBySl || f.closedByTp;
-                const cp = isClosed ? (f.closePrice || f.entry) : (prices[f.sym] || f.entry);
+                /* fallback for old positions without closePrice: use SL/TP price */
+                const closeFallback = f.closedBySl && f.sl ? f.sl : f.closedByTp && f.tp ? f.tp : f.entry;
+                const cp = isClosed ? (f.closePrice || closeFallback) : (prices[f.sym] || f.entry);
                 const dp = f.entry < 1 ? 4 : 2;
                 const pnl = isClosed && f.closePnl !== undefined ? f.closePnl : (f.liquidated ? -f.margin : f.side === "LONG" ? ((cp - f.entry) / f.entry) * f.margin * f.leverage : ((f.entry - cp) / f.entry) * f.margin * f.leverage);
                 const pnlP = f.margin > 0 ? (pnl / f.margin) * 100 : 0;
