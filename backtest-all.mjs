@@ -310,26 +310,6 @@ const detectSMA5xEMA9 = (candles) => {
   return null;
 };
 
-/* ─── Grid Bot ─── */
-const GRID_LEVELS = 10;
-const GRID_LOOKBACK = 60;
-const detectGridSignal = (candles) => {
-  if (candles.length < GRID_LOOKBACK + 2) return null;
-  const lookback = candles.slice(-GRID_LOOKBACK - 2, -2);
-  const low = Math.min(...lookback.map(c => c.l));
-  const high = Math.max(...lookback.map(c => c.h));
-  const range = high - low;
-  if (range <= 0) return null;
-  const gridSize = range / GRID_LEVELS;
-  const cur = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  for (let g = 1; g < GRID_LEVELS; g++) {
-    const level = low + g * gridSize;
-    if (prev.c >= level && cur.c < level) return { action: "BUY", reason: `Grid ${g}/${GRID_LEVELS} ▼` };
-    if (prev.c <= level && cur.c > level) return { action: "SELL", reason: `Grid ${g}/${GRID_LEVELS} ▲` };
-  }
-  return null;
-};
 
 /* ─── evalSignal ─── */
 const evalSignal = (strat, slice) => {
@@ -399,8 +379,6 @@ const evalSignal = (strat, slice) => {
     if (sig === "bearish") return { action: "SELL", reason: "SMC Ind▼" };
   } else if (strat === "scalp_sma_ema") {
     return detectSMA5xEMA9(slice);
-  } else if (strat === "grid") {
-    return detectGridSignal(slice);
   }
   return null;
 };
@@ -532,22 +510,6 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
     }
 
     const existingPos = openPositions.find((p) => p.sym === sym);
-    const isGrid = strategy === "grid";
-
-    /* Grid bot: BUY → open LONG, SELL → close LONG only (no SHORT) */
-    if (isGrid) {
-      if (action === "SELL" && existingPos && existingPos.side === "LONG") {
-        const pnl = ((price - existingPos.entry) / existingPos.entry) * existingPos.margin * existingPos.leverage;
-        const closeFee = existingPos.notional * FUT_FEE;
-        balance += existingPos.margin + pnl - closeFee;
-        openPositions.splice(openPositions.indexOf(existingPos), 1);
-        trades.push({ pnl, type: pnl > 0 ? "TP" : "SL" });
-        lastAction[sym] = action;
-        continue;
-      }
-      if (action === "SELL") { lastAction[sym] = action; continue; }
-    }
-
     let fSide = action === "BUY" ? "LONG" : "SHORT";
 
     /* no-flip when SL+TP set */
@@ -619,12 +581,11 @@ function runBacktest(candles, strategy, { leverage, slPct, tpPct, amtPerTrade, s
 }
 
 /* ─── Main ─── */
-const STRATEGIES = ["rsi", "macd", "donchian", "smc_fvg", "smc_bos", "smc_ob", "ema_cross", "bbands", "stoch_rsi", "scalp_pa", "scalp_smc_ind", "scalp_sma_ema", "grid"];
+const STRATEGIES = ["rsi", "macd", "donchian", "smc_fvg", "smc_bos", "smc_ob", "ema_cross", "bbands", "stoch_rsi", "scalp_pa", "scalp_smc_ind", "scalp_sma_ema"];
 const STRAT_NAMES = {
   rsi: "RSI", macd: "MACD", donchian: "Donchian", smc_fvg: "SMC FVG", smc_bos: "SMC BOS",
   smc_ob: "SMC OB", ema_cross: "EMA Cross", bbands: "BBands", stoch_rsi: "StochRSI",
-  scalp_pa: "Scalp PA", scalp_smc_ind: "Scalp SMC", scalp_sma_ema: "Scalp SMA×EMA",
-  grid: "Grid Bot"
+  scalp_pa: "Scalp PA", scalp_smc_ind: "Scalp SMC", scalp_sma_ema: "Scalp SMA×EMA"
 };
 
 const CONFIGS = [
