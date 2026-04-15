@@ -1992,18 +1992,48 @@ export default function TradingApp() {
           ) : (
             <div className={card}>
               <h2 className="text-yellow-400 font-bold text-sm mb-3">FUTURES ТОРГІВЛЯ</h2>
+              <p className="text-[10px] text-gray-500 mb-3 leading-relaxed">Ф'ючерси = торгівля з плечем. Ви вносите маржу (заставу), а торгуєте більшою сумою. Прибуток і збиток множаться на плече.</p>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 <div><label className="text-[10px] text-gray-500">МОНЕТА</label><select className={sel + " w-full"} value={fSym} onChange={(e) => setFSym(e.target.value)}>{SYMBOLS.map((s) => <option key={s} value={s}>{NICE[s]}/USDT</option>)}</select></div>
-                <div><label className="text-[10px] text-gray-500">НАПРЯМОК</label><div className="flex gap-1"><button onClick={() => setFSide("LONG")} className={`flex-1 py-2 rounded text-xs font-bold cursor-pointer ${fSide === "LONG" ? "bg-green-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>LONG</button><button onClick={() => setFSide("SHORT")} className={`flex-1 py-2 rounded text-xs font-bold cursor-pointer ${fSide === "SHORT" ? "bg-red-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>SHORT</button></div></div>
+                <div><label className="text-[10px] text-gray-500">НАПРЯМОК</label><div className="flex gap-1">
+                  <button onClick={() => setFSide("LONG")} className={`flex-1 py-2 rounded text-xs font-bold cursor-pointer ${fSide === "LONG" ? "bg-green-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>LONG ↑</button>
+                  <button onClick={() => setFSide("SHORT")} className={`flex-1 py-2 rounded text-xs font-bold cursor-pointer ${fSide === "SHORT" ? "bg-red-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>SHORT ↓</button>
+                </div></div>
               </div>
-              <div className="mb-2"><label className="text-[10px] text-gray-500">ПЛЕЧЕ</label><div className="flex gap-1">{LEVERAGES.map((l) => <button key={l} onClick={() => setFLev(l)} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${fLev === l ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>x{l}</button>)}</div></div>
-              <div className="mb-2"><label className="text-[10px] text-gray-500">СУМА (USDT)</label><input className={inp} type="number" placeholder="0.00" value={fAmt} onChange={(e) => setFAmt(e.target.value)} /></div>
+              <p className="text-[10px] mb-3 leading-relaxed" style={{ color: fSide === "LONG" ? "#4ade80" : "#f87171" }}>{fSide === "LONG" ? "LONG = ставка на ЗРОСТАННЯ ціни. Якщо ціна піде вверх — прибуток, вниз — збиток." : "SHORT = ставка на ПАДІННЯ ціни. Якщо ціна піде вниз — прибуток, вверх — збиток."}</p>
+              <div className="mb-2"><label className="text-[10px] text-gray-500">ПЛЕЧЕ (множник прибутку/збитку)</label><div className="flex gap-1">{LEVERAGES.map((l) => <button key={l} onClick={() => setFLev(l)} className={`flex-1 py-1.5 rounded text-xs font-bold transition cursor-pointer ${fLev === l ? "bg-yellow-500 text-black" : "bg-[#1a1a1a] text-gray-400"}`}>x{l}</button>)}</div></div>
+              <div className="mb-2"><label className="text-[10px] text-gray-500">NOTIONAL — загальна сума позиції (USDT)</label><input className={inp} type="number" placeholder="0.00" value={fAmt} onChange={(e) => setFAmt(e.target.value)} /></div>
               <div className="grid grid-cols-2 gap-2 mb-2">
-                <div><label className="text-[10px] text-gray-500">STOP LOSS ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 0.95 : 1.05), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fSl} onChange={(e) => setFSl(e.target.value)} /></div>
-                <div><label className="text-[10px] text-gray-500">TAKE PROFIT ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 1.05 : 0.95), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fTp} onChange={(e) => setFTp(e.target.value)} /></div>
+                <div><label className="text-[10px] text-gray-500">STOP LOSS — ціна ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 0.95 : 1.05), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fSl} onChange={(e) => setFSl(e.target.value)} /></div>
+                <div><label className="text-[10px] text-gray-500">TAKE PROFIT — ціна ($)</label><input className={inp} type="number" placeholder={`напр. ${prices[fSym] ? fmt(prices[fSym] * (fSide === "LONG" ? 1.05 : 0.95), prices[fSym] < 1 ? 4 : 2) : "—"}`} value={fTp} onChange={(e) => setFTp(e.target.value)} /></div>
               </div>
-              {prices[fSym] && fAmt && parseFloat(fAmt) > 0 && <p className="text-[10px] text-gray-500 mb-2">Маржа: ${fmt(parseFloat(fAmt) / fLev)} · Notional: ${fmt(parseFloat(fAmt))} · Комісія: ${fmt(parseFloat(fAmt) * FUT_FEE)}{fSl ? ` · SL: $${fSl}` : ""}{fTp ? ` · TP: $${fTp}` : ""}</p>}
-              <button onClick={execFutures} className={fSide === "LONG" ? btnG : btnR} style={{ width: "100%" }}>OPEN {fSide} x{fLev}</button>
+              {prices[fSym] && fAmt && parseFloat(fAmt) > 0 && (() => {
+                const price = prices[fSym];
+                const notional = parseFloat(fAmt);
+                const margin = notional / fLev;
+                const fee = notional * FUT_FEE;
+                const liqPrice = fSide === "LONG"
+                  ? price * (1 - 0.9 / fLev)
+                  : price * (1 + 0.9 / fLev);
+                const dp = price < 1 ? 4 : 2;
+                return (
+                  <div className="mb-3 p-2.5 rounded bg-[#1a1a1a] border border-[#333] text-[10px] leading-relaxed">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      <div className="text-gray-500">Ціна входу:</div><div className="text-white">${fmt(price, dp)}</div>
+                      <div className="text-gray-500">Маржа (застава):</div><div className="text-white">${fmt(margin)} <span className="text-gray-600">← знімається з балансу</span></div>
+                      <div className="text-gray-500">Розмір позиції:</div><div className="text-white">${fmt(notional)} <span className="text-gray-600">(маржа × плече)</span></div>
+                      <div className="text-gray-500">Комісія відкриття:</div><div className="text-white">${fmt(fee, 4)}</div>
+                      <div className="text-gray-500">Ліквідація:</div><div className="text-red-400 font-bold">${fmt(liqPrice, dp)} <span className="text-gray-600">({fSide === "LONG" ? "-" : "+"}{fmt(Math.abs((liqPrice - price) / price * 100), 1)}% від входу)</span></div>
+                      {fSl && <><div className="text-gray-500">Stop Loss:</div><div className="text-red-400">${fSl} <span className="text-gray-600">({fSide === "LONG" ? (parseFloat(fSl) < price ? "-" : "+") : (parseFloat(fSl) > price ? "+" : "-")}{fmt(Math.abs((parseFloat(fSl) - price) / price * 100), 1)}% · PnL: {fSide === "LONG" ? (parseFloat(fSl) < price ? "-" : "+") : (parseFloat(fSl) > price ? "+" : "-")}${fmt(Math.abs(((parseFloat(fSl) - price) / price) * margin * fLev))})</span></div></>}
+                      {fTp && <><div className="text-gray-500">Take Profit:</div><div className="text-green-400">${fTp} <span className="text-gray-600">({fSide === "LONG" ? (parseFloat(fTp) > price ? "+" : "-") : (parseFloat(fTp) < price ? "+" : "-")}{fmt(Math.abs((parseFloat(fTp) - price) / price * 100), 1)}% · PnL: +${fmt(Math.abs(((fSide === "LONG" ? parseFloat(fTp) - price : price - parseFloat(fTp)) / price) * margin * fLev))})</span></div></>}
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-[#333] text-gray-400">
+                      {fSide === "LONG" ? "📈" : "📉"} При зміні ціни на 1%, ваш PnL = {fSide === "LONG" ? "+" : "-"}${fmt(margin * fLev * 0.01)} (x{fLev} плече)
+                    </div>
+                  </div>
+                );
+              })()}
+              <button onClick={execFutures} className={fSide === "LONG" ? btnG : btnR} style={{ width: "100%" }}>OPEN {fSide} {NICE[fSym]} x{fLev}</button>
             </div>
           )}
         </div>
@@ -2021,30 +2051,50 @@ export default function TradingApp() {
           </div>
           <div className={card}>
             <h2 className="text-yellow-400 font-bold text-sm mb-3">FUTURES ПОЗИЦІЇ</h2>
-            {activeUser.futures.length === 0 ? <p className="text-gray-600 text-xs">Немає відкритих futures-позицій</p> : (
-              <div className="space-y-2">{activeUser.futures.map((f) => {
+            <p className="text-[10px] text-gray-600 mb-3">Кожна картка — одна відкрита позиція. Закрийте кнопкою CLOSE або дочекайтесь SL/TP/ліквідації.</p>
+            {activeUser.futures.length === 0 ? <p className="text-gray-600 text-xs">Немає відкритих futures-позицій. Перейдіть у вкладку TRADE → FUTURES щоб відкрити.</p> : (
+              <div className="space-y-3">{activeUser.futures.map((f) => {
                 const cp = prices[f.sym] || f.entry;
+                const dp = f.entry < 1 ? 4 : 2;
                 const isClosed = f.liquidated || f.closedBySl || f.closedByTp;
                 const pnl = f.liquidated ? -f.margin : f.side === "LONG" ? ((cp - f.entry) / f.entry) * f.margin * f.leverage : ((f.entry - cp) / f.entry) * f.margin * f.leverage;
                 const pnlP = f.margin > 0 ? (pnl / f.margin) * 100 : 0;
-                const statusLabel = f.liquidated ? "LIQUIDATED" : f.closedBySl ? "STOP LOSS" : f.closedByTp ? "TAKE PROFIT" : null;
+                const roe = pnlP; /* ROE = PnL / margin * 100 */
+                const liqPrice = f.side === "LONG"
+                  ? f.entry * (1 - 0.9 / f.leverage)
+                  : f.entry * (1 + 0.9 / f.leverage);
+                const distToLiq = Math.abs((cp - liqPrice) / cp * 100);
+                const statusLabel = f.liquidated ? "💀 ЛІКВІДОВАНО" : f.closedBySl ? "🛑 STOP LOSS" : f.closedByTp ? "🎯 TAKE PROFIT" : null;
                 const statusColor = f.liquidated ? "text-red-500" : f.closedBySl ? "text-red-400" : "text-green-400";
                 return (
-                  <div key={f.id} className={`p-3 rounded border ${f.liquidated ? "border-red-800 bg-red-950/30" : f.closedBySl ? "border-red-700 bg-red-950/20" : f.closedByTp ? "border-green-700 bg-green-950/20" : "border-[#333] bg-[#0d0d0d]"}`}>
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="text-yellow-400 font-semibold text-sm">{NICE[f.sym]} {f.side} x{f.leverage}</span>
-                      {statusLabel ? <span className={`${statusColor} font-bold text-xs ${f.liquidated ? "animate-pulse" : ""}`}>{statusLabel}</span> : <button onClick={() => closeFuture(f.id)} className="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1 rounded font-bold transition cursor-pointer">CLOSE</button>}
+                  <div key={f.id} className={`p-3 rounded-lg border ${f.liquidated ? "border-red-800 bg-red-950/30" : f.closedBySl ? "border-red-700 bg-red-950/20" : f.closedByTp ? "border-green-700 bg-green-950/20" : pnl >= 0 ? "border-green-900/60 bg-[#0d0d0d]" : "border-red-900/60 bg-[#0d0d0d]"}`}>
+                    <div className="flex justify-between items-center mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${f.side === "LONG" ? "bg-green-900/50 text-green-400" : "bg-red-900/50 text-red-400"}`}>{f.side}</span>
+                        <span className="text-yellow-400 font-bold text-sm">{NICE[f.sym]}</span>
+                        <span className="text-gray-500 text-xs">x{f.leverage}</span>
+                      </div>
+                      {statusLabel ? <span className={`${statusColor} font-bold text-xs ${f.liquidated ? "animate-pulse" : ""}`}>{statusLabel}</span> : <button onClick={() => closeFuture(f.id)} className="bg-red-700 hover:bg-red-600 text-white text-[10px] px-3 py-1.5 rounded font-bold transition cursor-pointer">CLOSE ПОЗИЦІЮ</button>}
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 sm:gap-2 text-[10px] text-gray-400">
-                      <div>Entry: ${fmt(f.entry, f.entry < 1 ? 4 : 2)}</div><div>Current: ${fmt(cp, cp < 1 ? 4 : 2)}</div><div>Margin: ${fmt(f.margin)}</div>
-                      <div className={pnl >= 0 ? "text-green-400" : "text-red-400"}>PnL: {pnl >= 0 ? "+" : ""}${fmt(pnl)} ({fmtP(pnlP)})</div>
+                    {/* PnL banner */}
+                    <div className={`rounded p-2 mb-2 text-center ${pnl >= 0 ? "bg-green-950/40" : "bg-red-950/40"}`}>
+                      <span className={`text-lg font-bold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}{fmt(pnl, 2)} USDT</span>
+                      <span className={`ml-2 text-xs ${pnl >= 0 ? "text-green-500" : "text-red-500"}`}>({pnl >= 0 ? "+" : ""}{fmt(roe, 1)}% ROE)</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
+                      <div className="text-gray-500">Ціна входу:</div><div className="text-white">${fmt(f.entry, dp)}</div>
+                      <div className="text-gray-500">Поточна ціна:</div><div className="text-white">${fmt(cp, dp)} <span className={cp >= f.entry ? "text-green-500" : "text-red-500"}>({cp >= f.entry ? "+" : ""}{fmt((cp - f.entry) / f.entry * 100, 2)}%)</span></div>
+                      <div className="text-gray-500">Маржа (застава):</div><div className="text-white">${fmt(f.margin)}</div>
+                      <div className="text-gray-500">Розмір позиції:</div><div className="text-white">${fmt(f.notional)}</div>
+                      <div className="text-gray-500">Ліквідація при:</div><div className="text-red-400">${fmt(liqPrice, dp)} <span className="text-gray-600">({fmt(distToLiq, 1)}% від поточної)</span></div>
                     </div>
                     {(f.sl || f.tp) && (
-                      <div className="flex gap-3 mt-1 text-[10px]">
-                        {f.sl && <span className={isClosed ? "text-gray-500 line-through" : "text-red-400"}>SL: ${fmt(f.sl, f.sl < 1 ? 4 : 2)}</span>}
-                        {f.tp && <span className={isClosed ? "text-gray-500 line-through" : "text-green-400"}>TP: ${fmt(f.tp, f.tp < 1 ? 4 : 2)}</span>}
+                      <div className="mt-2 pt-2 border-t border-[#222] grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
+                        {f.sl && <><div className="text-gray-500">Stop Loss:</div><div className={isClosed ? "text-gray-500 line-through" : "text-red-400"}>${fmt(f.sl, dp)} ({f.side === "LONG" ? "-" : "+"}{fmt(Math.abs((f.sl - f.entry) / f.entry * 100), 1)}% від входу)</div></>}
+                        {f.tp && <><div className="text-gray-500">Take Profit:</div><div className={isClosed ? "text-gray-500 line-through" : "text-green-400"}>${fmt(f.tp, dp)} ({f.side === "LONG" ? "+" : "-"}{fmt(Math.abs((f.tp - f.entry) / f.entry * 100), 1)}% від входу)</div></>}
                       </div>
                     )}
+                    {!isClosed && <p className="text-[9px] text-gray-600 mt-2">{f.side === "LONG" ? "📈 Прибуток коли ціна росте" : "📉 Прибуток коли ціна падає"} · Відкрито: {f.openTime}</p>}
                   </div>
                 );
               })}</div>
@@ -2058,16 +2108,19 @@ export default function TradingApp() {
         <div className={card}>
           <h2 className="text-green-400 font-bold text-sm mb-3">ІСТОРІЯ УГОД — {activeUser.name}</h2>
           {activeUser.trades.length === 0 ? <p className="text-gray-600 text-xs">Немає угод</p> : (
-            <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-gray-500"><th className="text-left py-1">ЧАС</th><th className="text-left py-1">ІНСТР</th><th className="text-left py-1">МОНЕТА</th><th className="text-left py-1">ТИП</th><th className="text-right py-1">ЦІНА</th><th className="text-right py-1">СУМА</th><th className="text-right py-1">КОМІСІЯ</th><th className="text-right py-1">SL</th><th className="text-right py-1">TP</th></tr></thead>
-              <tbody>{activeUser.trades.map((t) => (
-                <tr key={t.id} className="border-t border-[#222]">
+            <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-gray-500"><th className="text-left py-1">ЧАС</th><th className="text-left py-1">ІНСТР</th><th className="text-left py-1">МОНЕТА</th><th className="text-left py-1">ТИП</th><th className="text-right py-1">ЦІНА</th><th className="text-right py-1">СУМА</th><th className="text-right py-1">PnL</th><th className="text-right py-1">КОМІСІЯ</th></tr></thead>
+              <tbody>{activeUser.trades.map((t) => {
+                const isClose = t.side.includes("CLOSE") || t.side.includes("SL") || t.side.includes("TP") || t.side.includes("LIQ");
+                const pnlVal = isClose && t.inst === "FUTURES" ? t.qty : undefined; /* qty field stores PnL for futures closes */
+                return (
+                <tr key={t.id} className={`border-t border-[#222] ${isClose && pnlVal !== undefined ? (pnlVal >= 0 ? "bg-green-950/10" : "bg-red-950/10") : ""}`}>
                   <td className="py-1 text-gray-400">{t.time}</td><td className="py-1">{t.inst}</td><td className="py-1 text-yellow-400">{NICE[t.sym]}</td>
-                  <td className={`py-1 font-semibold ${t.side.includes("BUY") || t.side.includes("LONG") ? "text-green-400" : "text-red-400"}`}>{t.side}</td>
-                  <td className="py-1 text-right">${fmt(t.price, t.price < 1 ? 4 : 2)}</td><td className="py-1 text-right">${fmt(t.amount)}</td><td className="py-1 text-right text-gray-500">${fmt(t.fee, 4)}</td>
-                  <td className="py-1 text-right text-red-400">{t.sl ? `$${fmt(t.sl, t.sl < 1 ? 4 : 2)}` : "—"}</td>
-                  <td className="py-1 text-right text-green-400">{t.tp ? `$${fmt(t.tp, t.tp < 1 ? 4 : 2)}` : "—"}</td>
-                </tr>
-              ))}</tbody></table></div>
+                  <td className={`py-1 font-semibold ${t.side.includes("BUY") || t.side.includes("OPEN LONG") ? "text-green-400" : t.side.includes("TP") ? "text-green-400" : "text-red-400"}`}>{t.side}</td>
+                  <td className="py-1 text-right">${fmt(t.price, t.price < 1 ? 4 : 2)}</td><td className="py-1 text-right">${fmt(t.amount)}</td>
+                  <td className={`py-1 text-right font-semibold ${pnlVal !== undefined ? (pnlVal >= 0 ? "text-green-400" : "text-red-400") : "text-gray-600"}`}>{pnlVal !== undefined ? `${pnlVal >= 0 ? "+" : ""}$${fmt(pnlVal)}` : "—"}</td>
+                  <td className="py-1 text-right text-gray-500">${fmt(t.fee, 4)}</td>
+                </tr>);
+              })}</tbody></table></div>
           )}
         </div>
       )}
